@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+@theme {
+  /* 背景 */
+  --color-bg-base: #0a0a0f;
+  --color-bg-card: #111118;
+  --color-bg-elevated: #1a1a28;
+  --color-border: #1e1e2e;
+
+  /* 文字 */
+  --color-text-primary: #e0e0e0;
+  --color-text-secondary: #888888;
+  --color-text-muted: #555555;
+
+  /* 信号色 */
+  --color-long: #00ff88;
+  --color-short: #ff3366;
+  --color-hold: #888888;
+
+  /* 均线 / MACD */
+  --color-ma-fast: #00d4ff;
+  --color-ma-slow: #ffaa00;
+  --color-macd-dif: #00d4ff;
+  --color-macd-dea: #ffaa00;
+
+  /* 按钮 */
+  --color-btn-primary: #1a73e8;
+  --color-btn-hover: #1557b0;
+  --color-btn-danger: #e53935;
+  --color-btn-success: #00c853;
+
+  /* 警告 */
+  --color-warning: #ff9800;
+
+  /* 字体 */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+  --font-sans: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+html, body, #root {
+  height: 100%;
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+}
+
+/* 数字 / 价格使用等宽字体 */
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-card);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #333344;
+}
+
+/* 输入框基础样式 */
+input[type="text"],
+input[type="number"],
+input[type="password"] {
+  background-color: var(--color-bg-base);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="password"]:focus {
+  border-color: var(--color-btn-primary);
+}
+
+/* 按钮基础样式 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  transition: background-color 0.15s, opacity 0.15s;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background-color: var(--color-btn-primary);
+  color: white;
+}
+.btn-primary:hover:not(:disabled) {
+  background-color: var(--color-btn-hover);
+}
+.btn-success {
+  background-color: var(--color-btn-success);
+  color: white;
+}
+.btn-success:hover:not(:disabled) {
+  background-color: #00a844;
+}
+.btn-danger {
+  background-color: var(--color-btn-danger);
+  color: white;
+}
+.btn-danger:hover:not(:disabled) {
+  background-color: #c62828;
+}
+.btn-ghost {
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+}
