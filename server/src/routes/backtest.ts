@@ -27,6 +27,16 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
         rsiPeriod?: number;
         longRsiMax?: number;
         shortRsiMin?: number;
+        adxPeriod?: number;
+        minAdx?: number;
+        atrPeriod?: number;
+        atrStopMultiplier?: number;
+        atrTrailMultiplier?: number;
+        useTrailingStop?: boolean;
+        feeRate?: number;
+        slippageRate?: number;
+        cooldownBars?: number;
+        maxHoldBars?: number;
       };
     }> | undefined;
 

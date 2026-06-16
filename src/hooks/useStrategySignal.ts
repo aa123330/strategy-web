@@ -17,6 +17,9 @@ export function useStrategySignal() {
     rsiPeriod,
     longRsiMax,
     shortRsiMin,
+    adxPeriod,
+    minAdx,
+    atrPeriod,
     setSignal,
     addHistory,
   } = useStrategyStore();
@@ -33,7 +36,7 @@ export function useStrategySignal() {
       : strategy === "macd"
         ? generateMacdSignal(candles, macdFast, macdSlow, macdSignal, null)
         : strategy === "sma_rsi_pullback"
-          ? generateSmaRsiPullbackSignal(candles, { fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin }, null)
+          ? generateSmaRsiPullbackSignal(candles, { fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod }, null)
           : generateDualMaSignal(candles, fastPeriod, slowPeriod, null);
 
     setSignal(signal);
@@ -45,5 +48,5 @@ export function useStrategySignal() {
         addHistory(signal);
       }
     }
-  }, [addHistory, candles, fastPeriod, longRsiMax, macdFast, macdSignal, macdSlow, rsiPeriod, setSignal, shortRsiMin, slowPeriod, strategy]);
+  }, [addHistory, adxPeriod, atrPeriod, candles, fastPeriod, longRsiMax, macdFast, macdSignal, macdSlow, minAdx, rsiPeriod, setSignal, shortRsiMin, slowPeriod, strategy]);
 }

@@ -106,3 +106,38 @@ export function atr(candles: { high: number; low: number; close: number }[], per
   }
   return average(trueRanges, period);
 }
+
+export function adx(candles: { high: number; low: number; close: number }[], period = 14): number | null {
+  if (candles.length < period * 2 + 1) return null;
+
+  const plusDm: number[] = [];
+  const minusDm: number[] = [];
+  const trueRanges: number[] = [];
+
+  for (let i = 1; i < candles.length; i += 1) {
+    const current = candles[i];
+    const prev = candles[i - 1];
+    const upMove = current.high - prev.high;
+    const downMove = prev.low - current.low;
+    plusDm.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDm.push(downMove > upMove && downMove > 0 ? downMove : 0);
+    trueRanges.push(Math.max(current.high - current.low, Math.abs(current.high - prev.close), Math.abs(current.low - prev.close)));
+  }
+
+  const dxValues: number[] = [];
+  for (let end = period; end <= trueRanges.length; end += 1) {
+    const trSum = trueRanges.slice(end - period, end).reduce((sum, value) => sum + value, 0);
+    if (trSum === 0) {
+      dxValues.push(0);
+      continue;
+    }
+    const plusSum = plusDm.slice(end - period, end).reduce((sum, value) => sum + value, 0);
+    const minusSum = minusDm.slice(end - period, end).reduce((sum, value) => sum + value, 0);
+    const plusDi = (plusSum / trSum) * 100;
+    const minusDi = (minusSum / trSum) * 100;
+    const diSum = plusDi + minusDi;
+    dxValues.push(diSum === 0 ? 0 : (Math.abs(plusDi - minusDi) / diSum) * 100);
+  }
+
+  return average(dxValues, period);
+}

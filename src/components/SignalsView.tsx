@@ -61,7 +61,7 @@ function SignalCard({ signal }: { signal: CurrentSignal }) {
 }
 
 export default function SignalsView() {
-  const { strategy, setStrategy, fastPeriod, setParams, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, signal, signalHistory } = useStrategyStore();
+  const { strategy, setStrategy, fastPeriod, setParams, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, signal, signalHistory } = useStrategyStore();
   const { candles } = useMarketStore();
 
   return (
@@ -96,13 +96,15 @@ export default function SignalsView() {
           ))}
         </div>
 
-        <div style={{ marginTop: "16px", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
+        <div style={{ marginTop: "16px", display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }}>
           <ParamInput label="快线周期" value={fastPeriod} onChange={(v) => setParams({ fastPeriod: v })} min={5} max={100} step={1} />
           <ParamInput label="慢线周期" value={slowPeriod} onChange={(v) => setParams({ slowPeriod: v })} min={10} max={200} step={1} />
           <ParamInput label="RSI周期" value={rsiPeriod} onChange={(v) => setParams({ rsiPeriod: v })} min={5} max={50} step={1} disabled={strategy !== "sma_rsi_pullback"} />
           <ParamInput label="做多RSI上限" value={longRsiMax} onChange={(v) => setParams({ longRsiMax: v })} min={20} max={55} step={1} disabled={strategy !== "sma_rsi_pullback"} />
           <ParamInput label="做空RSI下限" value={shortRsiMin} onChange={(v) => setParams({ shortRsiMin: v })} min={45} max={80} step={1} disabled={strategy !== "sma_rsi_pullback"} />
-          <ParamInput label="综合阈值" value={65} onChange={() => {}} min={50} max={90} step={5} disabled />
+          <ParamInput label="ADX周期" value={adxPeriod} onChange={(v) => setParams({ adxPeriod: v })} min={7} max={40} step={1} disabled={strategy !== "sma_rsi_pullback"} />
+          <ParamInput label="最小ADX" value={minAdx} onChange={(v) => setParams({ minAdx: v })} min={10} max={45} step={1} disabled={strategy !== "sma_rsi_pullback"} />
+          <ParamInput label="ATR周期" value={atrPeriod} onChange={(v) => setParams({ atrPeriod: v })} min={5} max={50} step={1} disabled={strategy !== "sma_rsi_pullback"} />
         </div>
       </div>
 

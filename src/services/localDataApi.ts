@@ -33,6 +33,11 @@ export interface BacktestMetrics {
   maxConsecutiveLosses: number;
 }
 
+export interface BacktestSectionResult {
+  metrics: BacktestMetrics;
+  exitReasons?: Record<string, number>;
+}
+
 export interface BacktestResult {
   ok: true;
   exchange?: string;
@@ -40,8 +45,8 @@ export interface BacktestResult {
   interval: string;
   strategy?: "dual_ma" | "sma_rsi_pullback";
   split: {
-    train: { metrics: BacktestMetrics };
-    test: { metrics: BacktestMetrics };
+    train: BacktestSectionResult;
+    test: BacktestSectionResult;
   };
 }
 
@@ -144,6 +149,16 @@ export async function runBacktest(params: {
   rsiPeriod?: number;
   longRsiMax?: number;
   shortRsiMin?: number;
+  adxPeriod?: number;
+  minAdx?: number;
+  atrPeriod?: number;
+  atrStopMultiplier?: number;
+  atrTrailMultiplier?: number;
+  useTrailingStop?: boolean;
+  feeRate?: number;
+  slippageRate?: number;
+  cooldownBars?: number;
+  maxHoldBars?: number;
 }): Promise<BacktestResult | null> {
   try {
     const resp = await fetch(`${LOCAL_API_BASE}/backtest`, {
@@ -160,6 +175,16 @@ export async function runBacktest(params: {
           rsiPeriod: params.rsiPeriod,
           longRsiMax: params.longRsiMax,
           shortRsiMin: params.shortRsiMin,
+          adxPeriod: params.adxPeriod,
+          minAdx: params.minAdx,
+          atrPeriod: params.atrPeriod,
+          atrStopMultiplier: params.atrStopMultiplier,
+          atrTrailMultiplier: params.atrTrailMultiplier,
+          useTrailingStop: params.useTrailingStop,
+          feeRate: params.feeRate,
+          slippageRate: params.slippageRate,
+          cooldownBars: params.cooldownBars,
+          maxHoldBars: params.maxHoldBars,
         },
       }),
     });

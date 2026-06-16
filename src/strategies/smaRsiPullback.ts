@@ -1,5 +1,5 @@
 import type { CandleRow } from "../services/gatePublicApi";
-import { atr, rsi, sma } from "./indicators";
+import { adx, atr, rsi, sma } from "./indicators";
 import type { PositionInfo, StrategySignal } from "./dualMa";
 
 export interface SmaRsiPullbackOptions {
@@ -9,6 +9,8 @@ export interface SmaRsiPullbackOptions {
   longRsiMax?: number;
   shortRsiMin?: number;
   atrPeriod?: number;
+  adxPeriod?: number;
+  minAdx?: number;
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -43,7 +45,9 @@ export function generateSmaRsiPullbackSignal(
   const longRsiMax = options.longRsiMax ?? 42;
   const shortRsiMin = options.shortRsiMin ?? 58;
   const atrPeriod = options.atrPeriod ?? 14;
-  const required = Math.max(options.slowPeriod + 2, rsiPeriod + 2, atrPeriod + 2);
+  const adxPeriod = options.adxPeriod ?? 14;
+  const minAdx = options.minAdx ?? 20;
+  const required = Math.max(options.slowPeriod + 2, rsiPeriod + 2, atrPeriod + 2, adxPeriod * 2 + 2);
 
   if (candles.length < required) {
     return {
@@ -68,6 +72,7 @@ export function generateSmaRsiPullbackSignal(
   const rsiNow = rsi(closes, rsiPeriod);
   const rsiPrev = rsi(prevCloses, rsiPeriod);
   const atrValue = atr(candles, atrPeriod);
+  const adxValue = adx(candles, adxPeriod);
 
   if (!fastNow || !slowNow || !fastPrev || !slowPrev || rsiNow === null || rsiPrev === null) {
     return { action: "HOLD", price: last.close, reason: "SMA或RSI指标尚未形成", timestamp: last.time, symbol: "ETH_USDT", score: 0, confidence: 0 };
@@ -81,6 +86,7 @@ export function generateSmaRsiPullbackSignal(
   const fastSlopeDown = fastNow <= fastPrev;
   const atrPct = atrValue ? atrValue / last.close : 0;
   const volatilityOk = atrPct >= 0.0015 && atrPct <= 0.03;
+  const trendStrengthOk = adxValue === null || adxValue >= minAdx;
 
   let score = 0;
   const reasons: string[] = [];
@@ -110,14 +116,22 @@ export function generateSmaRsiPullbackSignal(
   } else {
     risks.push(atrPct < 0.0015 ? "当前波动率偏低，回调信号可能钝化" : "当前波动率偏高，合约止损滑点风险上升");
   }
+  if (adxValue === null) {
+    risks.push("ADX趋势强度尚未充分形成，趋势过滤暂不加分");
+  } else if (trendStrengthOk) {
+    score += score > 0 ? 12 : score < 0 ? -12 : 0;
+    reasons.push(`ADX=${adxValue.toFixed(1)}，趋势强度达到开仓过滤要求`);
+  } else {
+    risks.push(`ADX=${adxValue.toFixed(1)}，低于${minAdx}，震荡行情中暂不追趋势回调`);
+  }
 
   let action: StrategySignal["action"] = "HOLD";
   if (position?.side === "long" && (trendDown || rsiNow >= 62)) action = "CLOSE_LONG";
   else if (position?.side === "short" && (trendUp || rsiNow <= 38)) action = "CLOSE_SHORT";
-  else if (!position && trendUp && rsiLongPullback && volatilityOk) action = "OPEN_LONG";
-  else if (!position && trendDown && rsiShortBounce && volatilityOk) action = "OPEN_SHORT";
+  else if (!position && trendUp && rsiLongPullback && volatilityOk && trendStrengthOk) action = "OPEN_LONG";
+  else if (!position && trendDown && rsiShortBounce && volatilityOk && trendStrengthOk) action = "OPEN_SHORT";
 
-  if (action === "HOLD") risks.push("未满足趋势过滤与RSI回调共振，暂不追单");
+  if (action === "HOLD") risks.push("未满足趋势强度、波动率与RSI回调共振，暂不追单");
   if (action === "OPEN_LONG" || action === "OPEN_SHORT") risks.push("该策略参考公开回测思路重构，参数未必适合当前标的，需以样本外回测为准");
 
   score = clamp(score, -100, 100);
@@ -127,7 +141,7 @@ export function generateSmaRsiPullbackSignal(
   return {
     action,
     price: last.close,
-    reason: `${directionText}评分 ${score}，RSI ${rsiNow.toFixed(1)}`,
+    reason: `${directionText}评分 ${score}，RSI ${rsiNow.toFixed(1)}，ADX ${adxValue === null ? "--" : adxValue.toFixed(1)}`,
     timestamp: last.time,
     symbol: "ETH_USDT",
     score,

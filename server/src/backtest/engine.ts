@@ -12,11 +12,22 @@ export interface BacktestParams {
   rsiPeriod: number;
   longRsiMax: number;
   shortRsiMin: number;
+  adxPeriod: number;
+  minAdx: number;
+  atrPeriod: number;
+  atrStopMultiplier: number;
+  atrTrailMultiplier: number;
+  useTrailingStop: boolean;
+  feeRate: number;
+  slippageRate: number;
+  cooldownBars: number;
+  maxHoldBars: number;
 }
 
 export interface BacktestSectionResult {
   metrics: BacktestMetrics;
   trades: BacktestTrade[];
+  exitReasons: Record<string, number>;
 }
 
 export interface BacktestResult {
@@ -39,6 +50,16 @@ const DEFAULT_PARAMS: BacktestParams = {
   rsiPeriod: 14,
   longRsiMax: 42,
   shortRsiMin: 58,
+  adxPeriod: 14,
+  minAdx: 15,
+  atrPeriod: 14,
+  atrStopMultiplier: 1.8,
+  atrTrailMultiplier: 3.5,
+  useTrailingStop: true,
+  feeRate: 0.0005,
+  slippageRate: 0.0002,
+  cooldownBars: 1,
+  maxHoldBars: 0,
 };
 
 function smaAt(candles: Candle[], index: number, period: number) {
@@ -63,6 +84,47 @@ function rsiAt(candles: Candle[], index: number, period: number) {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
+function trueRange(candles: Candle[], index: number) {
+  const current = candles[index];
+  const prev = candles[index - 1];
+  return Math.max(current.high - current.low, Math.abs(current.high - prev.close), Math.abs(current.low - prev.close));
+}
+
+function atrAt(candles: Candle[], index: number, period: number) {
+  if (index < period) return null;
+  let sum = 0;
+  for (let i = index - period + 1; i <= index; i += 1) sum += trueRange(candles, i);
+  return sum / period;
+}
+
+function adxAt(candles: Candle[], index: number, period: number) {
+  if (index < period * 2) return null;
+  const dxValues: number[] = [];
+  for (let end = index - period + 1; end <= index; end += 1) {
+    let trSum = 0;
+    let plusDmSum = 0;
+    let minusDmSum = 0;
+    for (let i = end - period + 1; i <= end; i += 1) {
+      const current = candles[i];
+      const prev = candles[i - 1];
+      const upMove = current.high - prev.high;
+      const downMove = prev.low - current.low;
+      trSum += trueRange(candles, i);
+      plusDmSum += upMove > downMove && upMove > 0 ? upMove : 0;
+      minusDmSum += downMove > upMove && downMove > 0 ? downMove : 0;
+    }
+    if (trSum === 0) {
+      dxValues.push(0);
+      continue;
+    }
+    const plusDi = (plusDmSum / trSum) * 100;
+    const minusDi = (minusDmSum / trSum) * 100;
+    const diSum = plusDi + minusDi;
+    dxValues.push(diSum === 0 ? 0 : (Math.abs(plusDi - minusDi) / diSum) * 100);
+  }
+  return dxValues.reduce((sum, value) => sum + value, 0) / dxValues.length;
+}
+
 function maxDrawdown(equity: number[]) {
   let peak = equity[0] ?? 1;
   let maxDd = 0;
@@ -71,6 +133,18 @@ function maxDrawdown(equity: number[]) {
     maxDd = Math.min(maxDd, value / peak - 1);
   }
   return maxDd;
+}
+
+function tradingCost(params: BacktestParams) {
+  return params.feeRate * 2 + params.slippageRate * 2;
+}
+
+function applyEntrySlippage(price: number, side: "long" | "short", slippageRate: number) {
+  return side === "long" ? price * (1 + slippageRate) : price * (1 - slippageRate);
+}
+
+function applyExitSlippage(price: number, side: "long" | "short", slippageRate: number) {
+  return side === "long" ? price * (1 - slippageRate) : price * (1 + slippageRate);
 }
 
 function getEntrySignal(candles: Candle[], index: number, params: BacktestParams): "long" | "short" | null {
@@ -82,7 +156,8 @@ function getEntrySignal(candles: Candle[], index: number, params: BacktestParams
 
   if (params.strategy === "sma_rsi_pullback") {
     const rsiValue = rsiAt(candles, index, params.rsiPeriod);
-    if (rsiValue === null) return null;
+    const adxValue = adxAt(candles, index, params.adxPeriod);
+    if (rsiValue === null || adxValue === null || adxValue < params.minAdx) return null;
     const candle = candles[index];
     const trendUp = fast > slow && candle.close > slow;
     const trendDown = fast < slow && candle.close < slow;
@@ -147,39 +222,70 @@ function metrics(candles: Candle[], trades: BacktestTrade[]): BacktestMetrics {
 export function runSectionBacktest(candles: Candle[], inputParams?: Partial<BacktestParams>): BacktestSectionResult {
   const params = { ...DEFAULT_PARAMS, ...inputParams };
   const trades: BacktestTrade[] = [];
-  let position: { side: "long" | "short"; entryTime: number; entryPrice: number } | null = null;
+  const exitReasons: Record<string, number> = {};
+  let position: { side: "long" | "short"; entryTime: number; entryPrice: number; entryIndex: number; stopPrice: number | null } | null = null;
+  let cooldownUntil = -1;
 
-  const warmup = Math.max(params.slowPeriod + 1, params.rsiPeriod + 1);
+  const warmup = Math.max(params.slowPeriod + 1, params.rsiPeriod + 1, params.atrPeriod + 1, params.adxPeriod * 2 + 1);
   for (let i = warmup; i < candles.length; i += 1) {
     const candle = candles[i];
     if (position) {
       const direction = position.side === "long" ? 1 : -1;
-      const pnlPct = ((candle.close - position.entryPrice) / position.entryPrice) * direction;
-      const crossedStop = pnlPct <= -params.stopLossPct;
-      const crossedTakeProfit = pnlPct >= params.takeProfitPct;
-      const reversed = shouldReverseExit(candles, i, position.side, params);
+      const atrValue = atrAt(candles, i, params.atrPeriod);
+      if (params.useTrailingStop && atrValue !== null) {
+        const candidateStop = candle.close - direction * atrValue * params.atrTrailMultiplier;
+        position.stopPrice = position.stopPrice === null
+          ? candidateStop
+          : position.side === "long"
+            ? Math.max(position.stopPrice, candidateStop)
+            : Math.min(position.stopPrice, candidateStop);
+      }
 
-      if (crossedStop || crossedTakeProfit || reversed) {
+      const exitPriceWithSlippage = applyExitSlippage(candle.close, position.side, params.slippageRate);
+      const rawPnlPct = ((exitPriceWithSlippage - position.entryPrice) / position.entryPrice) * direction;
+      const pnlPct = rawPnlPct - tradingCost(params);
+      const crossedFixedStop = rawPnlPct <= -params.stopLossPct;
+      const crossedTakeProfit = rawPnlPct >= params.takeProfitPct;
+      const crossedTrailingStop = params.useTrailingStop && position.stopPrice !== null && (position.side === "long" ? candle.close <= position.stopPrice : candle.close >= position.stopPrice);
+      const reversed = shouldReverseExit(candles, i, position.side, params);
+      const timedOut = params.maxHoldBars > 0 && i - position.entryIndex >= params.maxHoldBars;
+
+      if (crossedFixedStop || crossedTakeProfit || crossedTrailingStop || reversed || timedOut) {
+        const reason = crossedFixedStop ? "stop_loss" : crossedTakeProfit ? "take_profit" : crossedTrailingStop ? "trailing_stop" : reversed ? "reverse" : "time_exit";
+        exitReasons[reason] = (exitReasons[reason] ?? 0) + 1;
         trades.push({
           side: position.side,
           entryTime: position.entryTime,
           exitTime: candle.time,
           entryPrice: position.entryPrice,
-          exitPrice: candle.close,
+          exitPrice: exitPriceWithSlippage,
           pnlPct,
-          reason: crossedStop ? "stop_loss" : crossedTakeProfit ? "take_profit" : "reverse",
+          reason,
         });
         position = null;
+        cooldownUntil = i + Math.max(0, params.cooldownBars);
       }
     }
 
-    if (!position) {
+    if (!position && i >= cooldownUntil) {
       const signal = getEntrySignal(candles, i, params);
-      if (signal) position = { side: signal, entryTime: candle.time, entryPrice: candle.close };
+      if (signal) {
+        const atrValue = atrAt(candles, i, params.atrPeriod);
+        const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
+        const direction = signal === "long" ? 1 : -1;
+        const atrStopDistance = atrValue === null ? entryPrice * params.stopLossPct : atrValue * params.atrStopMultiplier;
+        position = {
+          side: signal,
+          entryTime: candle.time,
+          entryPrice,
+          entryIndex: i,
+          stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
+        };
+      }
     }
   }
 
-  return { metrics: metrics(candles, trades), trades };
+  return { metrics: metrics(candles, trades), trades, exitReasons };
 }
 
 export function runSplitBacktest(params: {

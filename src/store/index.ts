@@ -82,6 +82,16 @@ interface StrategyState {
   rsiPeriod: number;
   longRsiMax: number;
   shortRsiMin: number;
+  adxPeriod: number;
+  minAdx: number;
+  atrPeriod: number;
+  atrStopMultiplier: number;
+  atrTrailMultiplier: number;
+  useTrailingStop: boolean;
+  feeRate: number;
+  slippageRate: number;
+  cooldownBars: number;
+  maxHoldBars: number;
   signal: StrategySignal | null;
   signalHistory: StrategySignal[];
   setStrategy: (s: StrategyName) => void;
@@ -113,6 +123,16 @@ export const useStrategyStore = create<StrategyState>((set) => ({
   rsiPeriod: 14,
   longRsiMax: 42,
   shortRsiMin: 58,
+  adxPeriod: 14,
+  minAdx: 15,
+  atrPeriod: 14,
+  atrStopMultiplier: 1.8,
+  atrTrailMultiplier: 3.5,
+  useTrailingStop: true,
+  feeRate: 0.0005,
+  slippageRate: 0.0002,
+  cooldownBars: 1,
+  maxHoldBars: 0,
   signal: null,
   signalHistory: [],
   setStrategy: (s) => set({ strategy: s }),
