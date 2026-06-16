@@ -38,6 +38,7 @@ export interface BacktestResult {
   exchange?: string;
   symbol: string;
   interval: string;
+  strategy?: "dual_ma" | "sma_rsi_pullback";
   split: {
     train: { metrics: BacktestMetrics };
     test: { metrics: BacktestMetrics };
@@ -137,8 +138,12 @@ export async function runBacktest(params: {
   exchange?: string;
   symbol?: string;
   interval: string;
+  strategy?: "dual_ma" | "sma_rsi_pullback";
   fastPeriod: number;
   slowPeriod: number;
+  rsiPeriod?: number;
+  longRsiMax?: number;
+  shortRsiMin?: number;
 }): Promise<BacktestResult | null> {
   try {
     const resp = await fetch(`${LOCAL_API_BASE}/backtest`, {
@@ -149,8 +154,12 @@ export async function runBacktest(params: {
         symbol: params.symbol ?? "ETH_USDT",
         interval: params.interval,
         params: {
+          strategy: params.strategy,
           fastPeriod: params.fastPeriod,
           slowPeriod: params.slowPeriod,
+          rsiPeriod: params.rsiPeriod,
+          longRsiMax: params.longRsiMax,
+          shortRsiMin: params.shortRsiMin,
         },
       }),
     });

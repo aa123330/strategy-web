@@ -69,6 +69,33 @@ export function average(values: number[], period: number): number | null {
   return slice.reduce((sum, value) => sum + value, 0) / period;
 }
 
+export function rsi(values: number[], period = 14): number | null {
+  if (values.length < period + 1) return null;
+
+  let gainSum = 0;
+  let lossSum = 0;
+  for (let i = 1; i <= period; i += 1) {
+    const change = values[i] - values[i - 1];
+    if (change >= 0) gainSum += change;
+    else lossSum += Math.abs(change);
+  }
+
+  let avgGain = gainSum / period;
+  let avgLoss = lossSum / period;
+
+  for (let i = period + 1; i < values.length; i += 1) {
+    const change = values[i] - values[i - 1];
+    const gain = change > 0 ? change : 0;
+    const loss = change < 0 ? Math.abs(change) : 0;
+    avgGain = (avgGain * (period - 1) + gain) / period;
+    avgLoss = (avgLoss * (period - 1) + loss) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - 100 / (1 + rs);
+}
+
 export function atr(candles: { high: number; low: number; close: number }[], period = 14): number | null {
   if (candles.length < period + 1) return null;
   const trueRanges: number[] = [];

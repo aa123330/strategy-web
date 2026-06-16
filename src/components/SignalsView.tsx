@@ -61,7 +61,7 @@ function SignalCard({ signal }: { signal: CurrentSignal }) {
 }
 
 export default function SignalsView() {
-  const { strategy, setStrategy, fastPeriod, setParams, slowPeriod, signal, signalHistory } = useStrategyStore();
+  const { strategy, setStrategy, fastPeriod, setParams, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, signal, signalHistory } = useStrategyStore();
   const { candles } = useMarketStore();
 
   return (
@@ -72,6 +72,7 @@ export default function SignalsView() {
           {[
             { id: "composite" as const, label: "综合评分", desc: "趋势 + 动量 + ATR风控" },
             { id: "dual_ma" as const, label: "双均线", desc: `MA${fastPeriod} / MA${slowPeriod}` },
+            { id: "sma_rsi_pullback" as const, label: "SMA+RSI", desc: "趋势过滤 + 回调入场" },
             { id: "macd" as const, label: "MACD", desc: "12 / 26 / 9" },
           ].map((s) => (
             <button
@@ -98,7 +99,10 @@ export default function SignalsView() {
         <div style={{ marginTop: "16px", display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
           <ParamInput label="快线周期" value={fastPeriod} onChange={(v) => setParams({ fastPeriod: v })} min={5} max={100} step={1} />
           <ParamInput label="慢线周期" value={slowPeriod} onChange={(v) => setParams({ slowPeriod: v })} min={10} max={200} step={1} />
-          <ParamInput label="开仓阈值" value={65} onChange={() => {}} min={50} max={90} step={5} disabled />
+          <ParamInput label="RSI周期" value={rsiPeriod} onChange={(v) => setParams({ rsiPeriod: v })} min={5} max={50} step={1} disabled={strategy !== "sma_rsi_pullback"} />
+          <ParamInput label="做多RSI上限" value={longRsiMax} onChange={(v) => setParams({ longRsiMax: v })} min={20} max={55} step={1} disabled={strategy !== "sma_rsi_pullback"} />
+          <ParamInput label="做空RSI下限" value={shortRsiMin} onChange={(v) => setParams({ shortRsiMin: v })} min={45} max={80} step={1} disabled={strategy !== "sma_rsi_pullback"} />
+          <ParamInput label="综合阈值" value={65} onChange={() => {}} min={50} max={90} step={5} disabled />
         </div>
       </div>
 

@@ -1,4 +1,5 @@
 export * from "./dualMa";
 export * from "./macdStrategy";
 export * from "./compositeStrategy";
-export { sma, ema, macd, calcMacd, atr, average } from "./indicators";
+export * from "./smaRsiPullback";
+export { sma, ema, macd, calcMacd, atr, average, rsi } from "./indicators";

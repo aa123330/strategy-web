@@ -19,10 +19,14 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
       limit: number;
       trainRatio: number;
       params: {
+        strategy?: "dual_ma" | "sma_rsi_pullback";
         fastPeriod?: number;
         slowPeriod?: number;
         stopLossPct?: number;
         takeProfitPct?: number;
+        rsiPeriod?: number;
+        longRsiMax?: number;
+        shortRsiMin?: number;
       };
     }> | undefined;
 

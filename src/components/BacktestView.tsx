@@ -72,11 +72,12 @@ function MetricsGrid({ metrics }: { metrics: BacktestMetrics }) {
 
 export default function BacktestView() {
   const { interval, historicalSource } = useMarketStore();
-  const { fastPeriod, slowPeriod } = useStrategyStore();
+  const { strategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin } = useStrategyStore();
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [range, setRange] = useState<CandleRange | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [validationMessage, setValidationMessage] = useState<string | null>(null);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
   const [backfillJob, setBackfillJob] = useState<BackfillJob | null>(null);
@@ -88,17 +89,28 @@ export default function BacktestView() {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const local = await getLocalCandles({ exchange: historicalSource, symbol: "ETH_USDT", interval, limit: 1 });
-    setRange(local?.range ?? null);
-    const data = await runBacktest({ exchange: historicalSource, symbol: "ETH_USDT", interval, fastPeriod, slowPeriod });
-    if (!data) {
+    setValidationMessage("正在重新读取本地样本并执行回测...");
+    try {
+      const local = await getLocalCandles({ exchange: historicalSource, symbol: "ETH_USDT", interval, limit: 1 });
+      setRange(local?.range ?? null);
+      const backtestStrategy = strategy === "sma_rsi_pullback" ? "sma_rsi_pullback" : "dual_ma";
+      const data = await runBacktest({ exchange: historicalSource, symbol: "ETH_USDT", interval, strategy: backtestStrategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin });
+      if (!data) {
+        setResult(null);
+        setValidationMessage(null);
+        setError(`本地历史数据不足或后端未启动。当前历史源：${historicalSource.toUpperCase()}。长历史建议选择 OKX 后点击“补充历史数据”，或运行 npm run backfill -- --exchange okx --symbols ETH_USDT,BTC_USDT --intervals 15m,1h --days 180`);
+      } else {
+        setResult(data);
+        setValidationMessage(`验证完成：${data.exchange?.toUpperCase() ?? historicalSource.toUpperCase()} / ${data.symbol} / ${data.interval} / ${data.strategy === "sma_rsi_pullback" ? "SMA+RSI" : "双均线"}，训练段 ${data.split.train.metrics.candles} 根，测试段 ${data.split.test.metrics.candles} 根。`);
+      }
+    } catch (err) {
       setResult(null);
-      setError(`本地历史数据不足或后端未启动。当前历史源：${historicalSource.toUpperCase()}。长历史建议选择 OKX 后点击“补充历史数据”，或运行 npm run backfill -- --exchange okx --symbols ETH_USDT,BTC_USDT --intervals 15m,1h --days 180`);
-    } else {
-      setResult(data);
+      setValidationMessage(null);
+      setError(`重新验证失败：${err instanceof Error ? err.message : "未知错误"}`);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
-  }, [fastPeriod, historicalSource, interval, slowPeriod]);
+  }, [fastPeriod, historicalSource, interval, longRsiMax, rsiPeriod, shortRsiMin, slowPeriod, strategy]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -153,6 +165,7 @@ export default function BacktestView() {
   const runBackfill = async () => {
     setBackfilling(true);
     setBackfillMessage(null);
+    setValidationMessage(null);
     setBackfillJob(null);
     setError(null);
     const symbols = backfillSymbols.split(",").map((s) => s.trim()).filter(Boolean);
@@ -176,16 +189,17 @@ export default function BacktestView() {
           <BarChart3 size={22} style={{ color: "var(--color-btn-primary)" }} />
           <div>
             <div style={{ fontSize: "16px", color: "var(--color-text-primary)", fontWeight: 600 }}>样本外回测验证</div>
-            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>使用本地长期K线做 70% 训练段 / 30% 测试段切分，当前按 {historicalSource.toUpperCase()} 数据验证双均线基础信号。</div>
+            <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>使用本地长期K线做 70% 训练段 / 30% 测试段切分，当前按 {historicalSource.toUpperCase()} 数据验证 {strategy === "sma_rsi_pullback" ? "SMA+RSI回调" : "双均线"} 信号。</div>
           </div>
         </div>
-        <button onClick={load} disabled={loading} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "var(--color-bg-elevated)", color: "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
-          <RefreshCw size={14} />{loading ? "验证中" : "重新验证"}
+        <button onClick={() => void load()} disabled={loading} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          <RefreshCw size={14} style={{ animation: loading ? "spin 1s linear infinite" : undefined }} />{loading ? "验证中..." : "重新验证"}
         </button>
       </div>
 
       <div style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px", display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px", color: "var(--color-text-secondary)", fontSize: "12px" }}>
         <MetricCard label="历史数据源" value={historicalSource.toUpperCase()} />
+        <MetricCard label="回测策略" value={strategy === "sma_rsi_pullback" ? "SMA+RSI" : "双均线"} />
         <MetricCard label="本地样本数" value={String(range?.count ?? 0)} />
         <MetricCard label="起始时间" value={fmtTime(range?.minTime)} />
         <MetricCard label="最新时间" value={fmtTime(range?.maxTime)} />
@@ -221,6 +235,10 @@ export default function BacktestView() {
           </div>
         )}
       </div>
+
+      {validationMessage && (
+        <div style={{ backgroundColor: loading ? "rgba(26,115,232,0.08)" : "rgba(0,255,136,0.08)", border: `1px solid ${loading ? "rgba(26,115,232,0.25)" : "rgba(0,255,136,0.25)"}`, borderRadius: "10px", padding: "14px", color: loading ? "var(--color-btn-primary)" : "var(--color-long)", fontSize: "13px", lineHeight: 1.6 }}>{validationMessage}</div>
+      )}
 
       {backfillMessage && (
         <div style={{ backgroundColor: "rgba(0,255,136,0.08)", border: "1px solid rgba(0,255,136,0.25)", borderRadius: "10px", padding: "14px", color: "var(--color-long)", fontSize: "13px", lineHeight: 1.6 }}>{backfillMessage}</div>

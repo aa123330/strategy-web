@@ -70,7 +70,7 @@ export const useMarketStore = create<MarketState>((set) => ({
 }));
 
 // === 策略状态 ===
-type StrategyName = "composite" | "dual_ma" | "macd";
+export type StrategyName = "composite" | "dual_ma" | "macd" | "sma_rsi_pullback";
 
 interface StrategyState {
   strategy: StrategyName;
@@ -79,6 +79,9 @@ interface StrategyState {
   macdFast: number;
   macdSlow: number;
   macdSignal: number;
+  rsiPeriod: number;
+  longRsiMax: number;
+  shortRsiMin: number;
   signal: StrategySignal | null;
   signalHistory: StrategySignal[];
   setStrategy: (s: StrategyName) => void;
@@ -107,6 +110,9 @@ export const useStrategyStore = create<StrategyState>((set) => ({
   macdFast: 12,
   macdSlow: 26,
   macdSignal: 9,
+  rsiPeriod: 14,
+  longRsiMax: 42,
+  shortRsiMin: 58,
   signal: null,
   signalHistory: [],
   setStrategy: (s) => set({ strategy: s }),

@@ -3,6 +3,7 @@ import { useMarketStore, useStrategyStore } from "../store";
 import { generateCompositeSignal } from "../strategies/compositeStrategy";
 import { generateDualMaSignal } from "../strategies/dualMa";
 import { generateMacdSignal } from "../strategies/macdStrategy";
+import { generateSmaRsiPullbackSignal } from "../strategies/smaRsiPullback";
 
 export function useStrategySignal() {
   const { candles } = useMarketStore();
@@ -13,6 +14,9 @@ export function useStrategySignal() {
     macdFast,
     macdSlow,
     macdSignal,
+    rsiPeriod,
+    longRsiMax,
+    shortRsiMin,
     setSignal,
     addHistory,
   } = useStrategyStore();
@@ -28,7 +32,9 @@ export function useStrategySignal() {
       ? generateCompositeSignal(candles, { fastPeriod, slowPeriod, macdFast, macdSlow, macdSignal })
       : strategy === "macd"
         ? generateMacdSignal(candles, macdFast, macdSlow, macdSignal, null)
-        : generateDualMaSignal(candles, fastPeriod, slowPeriod, null);
+        : strategy === "sma_rsi_pullback"
+          ? generateSmaRsiPullbackSignal(candles, { fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin }, null)
+          : generateDualMaSignal(candles, fastPeriod, slowPeriod, null);
 
     setSignal(signal);
 
@@ -39,5 +45,5 @@ export function useStrategySignal() {
         addHistory(signal);
       }
     }
-  }, [addHistory, candles, fastPeriod, macdFast, macdSignal, macdSlow, setSignal, slowPeriod, strategy]);
+  }, [addHistory, candles, fastPeriod, longRsiMax, macdFast, macdSignal, macdSlow, rsiPeriod, setSignal, shortRsiMin, slowPeriod, strategy]);
 }
