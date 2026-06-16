@@ -64,22 +64,26 @@ export class GateWsClient {
   private candles: CandleRow[] = [];
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private manuallyClosed = false;
+  private lastEmitAt = 0;
+  private emitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     interval: GateInterval,
     onUpdate: (candles: CandleRow[]) => void,
-    onStatusChange: (status: WsStatus) => void
+    onStatusChange: (status: WsStatus) => void,
+    initialCandles?: CandleRow[]
   ) {
     this.interval = interval;
     this.onUpdate = onUpdate;
     this.onStatusChange = onStatusChange;
+    this.candles = initialCandles ? [...initialCandles] : [];
   }
 
   async connect() {
     this.manuallyClosed = false;
     this.onStatusChange("connecting");
     try {
-      await this.fetchHistorical();
+      if (!this.candles.length) await this.fetchHistorical();
       if (this.manuallyClosed) return;
       this.ws = new WebSocket("wss://fx-ws.gateio.ws/v4/ws/usdt");
 
@@ -179,7 +183,7 @@ export class GateWsClient {
     const data = await resp.json();
     if (!Array.isArray(data)) throw new Error("Gate data invalid");
     this.candles = data.map((item: GateCandlePayload) => this.normalizeCandle(item));
-    this.onUpdate([...this.candles]);
+    this.emitUpdate(true);
   }
 
   private normalizeCandle(item: GateCandlePayload): CandleRow {
@@ -198,7 +202,7 @@ export class GateWsClient {
   private updateCandles(candle: CandleRow) {
     if (!this.candles.length) {
       this.candles = [candle];
-      this.onUpdate([...this.candles]);
+      this.emitUpdate(true);
       return;
     }
     const last = this.candles[this.candles.length - 1];
@@ -206,9 +210,31 @@ export class GateWsClient {
       this.candles[this.candles.length - 1] = candle;
     } else if (candle.time > last.time) {
       this.candles.push(candle);
-      if (this.candles.length > 300) this.candles.shift();
+      if (this.candles.length > 5000) this.candles.shift();
     }
-    this.onUpdate([...this.candles]);
+    this.emitUpdate();
+  }
+
+  private emitUpdate(force = false) {
+    if (this.manuallyClosed) return;
+    const now = Date.now();
+    const doEmit = () => {
+      if (this.manuallyClosed) return;
+      this.emitTimer = null;
+      this.lastEmitAt = Date.now();
+      this.onUpdate([...this.candles]);
+    };
+    if (force || now - this.lastEmitAt >= 500) {
+      if (this.emitTimer) {
+        clearTimeout(this.emitTimer);
+        this.emitTimer = null;
+      }
+      doEmit();
+      return;
+    }
+    if (!this.emitTimer) {
+      this.emitTimer = setTimeout(doEmit, 500 - (now - this.lastEmitAt));
+    }
   }
 
   private updateFromTicker(ticker: GateTickerPayload) {
@@ -243,7 +269,7 @@ export class GateWsClient {
         is_ascending: price >= last.close,
         turnover: turnover ?? "0",
       });
-      if (this.candles.length > 300) this.candles.shift();
+      if (this.candles.length > 5000) this.candles.shift();
     } else {
       last.close = price;
       last.high = Math.max(last.high, price);
@@ -253,7 +279,7 @@ export class GateWsClient {
       this.candles[this.candles.length - 1] = last;
     }
 
-    this.onUpdate([...this.candles]);
+    this.emitUpdate();
   }
 
   private scheduleReconnect() {
@@ -274,6 +300,8 @@ export class GateWsClient {
     this.reconnectTimer = null;
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = null;
+    if (this.emitTimer) clearTimeout(this.emitTimer);
+    this.emitTimer = null;
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.onerror = null;

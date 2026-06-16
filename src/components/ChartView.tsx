@@ -1,10 +1,10 @@
 import { useEffect, useRef, useMemo } from "react";
 import { createChart, ColorType, CandlestickSeries, LineSeries, HistogramSeries } from "lightweight-charts";
 import type { IChartApi, ISeriesApi, LineData, HistogramData, Time } from "lightweight-charts";
-import { useMarketStore, useStrategyStore, type DataSourceName } from "../store";
-import { sma } from "../strategies/indicators";
-import { macd } from "../strategies/indicators";
+import { useMarketStore, useStrategyStore, type DataSourceName, type HistoricalSourceName } from "../store";
 import { RefreshCw, TrendingUp } from "lucide-react";
+
+const CHART_MAX_CANDLES = 1200;
 
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const LONG_COLOR = "#00ff88";
@@ -32,8 +32,64 @@ function candleToLightweight(candles: { time: number; open: number; high: number
   return candles.map((c) => ({ time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close }));
 }
 
+function calcSmaSeries(candles: { time: number; close: number }[], period: number): LineData[] {
+  if (candles.length < period) return [];
+  const result: LineData[] = [];
+  let sum = 0;
+  for (let i = 0; i < candles.length; i += 1) {
+    sum += candles[i].close;
+    if (i >= period) sum -= candles[i - period].close;
+    if (i >= period - 1) result.push({ time: candles[i].time as Time, value: sum / period });
+  }
+  return result;
+}
+
+function calcMacdSeries(candles: { time: number; close: number }[], fast: number, slow: number, signal: number) {
+  if (candles.length < slow + signal) return { hist: [] as HistogramData[], dif: [] as LineData[], dea: [] as LineData[] };
+  const hist: HistogramData[] = [];
+  const dif: LineData[] = [];
+  const dea: LineData[] = [];
+  const fastK = 2 / (fast + 1);
+  const slowK = 2 / (slow + 1);
+  const signalK = 2 / (signal + 1);
+  let fastEma = 0;
+  let slowEma = 0;
+  let deaVal = 0;
+  let difCount = 0;
+  let difSeedSum = 0;
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const close = candles[i].close;
+    if (i < fast) fastEma += close;
+    if (i === fast - 1) fastEma /= fast;
+    if (i >= fast) fastEma = close * fastK + fastEma * (1 - fastK);
+
+    if (i < slow) slowEma += close;
+    if (i === slow - 1) slowEma /= slow;
+    if (i >= slow) slowEma = close * slowK + slowEma * (1 - slowK);
+    if (i < slow - 1) continue;
+
+    const difVal = fastEma - slowEma;
+    difCount += 1;
+    if (difCount <= signal) {
+      difSeedSum += difVal;
+      if (difCount === signal) deaVal = difSeedSum / signal;
+      else continue;
+    } else {
+      deaVal = difVal * signalK + deaVal * (1 - signalK);
+    }
+
+    const histVal = (difVal - deaVal) * 2;
+    const time = candles[i].time as Time;
+    hist.push({ time, value: histVal, color: histVal >= 0 ? LONG_COLOR : SHORT_COLOR });
+    dif.push({ time, value: difVal });
+    dea.push({ time, value: deaVal });
+  }
+  return { hist, dif, dea };
+}
+
 export default function ChartView() {
-  const { candles, interval, setInterval, loading, activeSource, preferredSource, connectionStatus, connectionError, lastUpdatedAt, setPreferredSource } = useMarketStore();
+  const { candles, interval, setInterval, loading, activeSource, preferredSource, historicalSource, connectionStatus, connectionError, lastUpdatedAt, setPreferredSource, setHistoricalSource } = useMarketStore();
   const { strategy, fastPeriod, slowPeriod, macdFast, macdSlow, macdSignal, signal } = useStrategyStore();
 
   const sourceLabels: Record<DataSourceName, string> = {
@@ -54,45 +110,17 @@ export default function ChartView() {
   const macdSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const difSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const deaSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
+  const lastFullSetKeyRef = useRef("");
+  const lastCandleTimeRef = useRef<number | null>(null);
 
-  // 计算均线数据
-  const maFastData = useMemo<LineData[]>(() => {
-    if (!candles.length) return [];
-    const closes = candles.map((c) => c.close);
-    return candles.map((c, i) => {
-      const val = sma(closes.slice(0, i + 1), fastPeriod);
-      return val !== null ? { time: c.time as Time, value: val } : null;
-    }).filter(Boolean) as LineData[];
-  }, [candles, fastPeriod]);
+  const visibleCandles = useMemo(() => candles.slice(-CHART_MAX_CANDLES), [candles]);
 
-  const maSlowData = useMemo<LineData[]>(() => {
-    if (!candles.length) return [];
-    const closes = candles.map((c) => c.close);
-    return candles.map((c, i) => {
-      const val = sma(closes.slice(0, i + 1), slowPeriod);
-      return val !== null ? { time: c.time as Time, value: val } : null;
-    }).filter(Boolean) as LineData[];
-  }, [candles, slowPeriod]);
+  // 计算均线数据：线性滚动计算，避免实时更新时 O(n²) 卡顿
+  const maFastData = useMemo<LineData[]>(() => calcSmaSeries(visibleCandles, fastPeriod), [visibleCandles, fastPeriod]);
+  const maSlowData = useMemo<LineData[]>(() => calcSmaSeries(visibleCandles, slowPeriod), [visibleCandles, slowPeriod]);
 
-  // 计算 MACD 数据
-  const macdData = useMemo(() => {
-    if (!candles.length) return { hist: [], dif: [], dea: [] };
-    const closes = candles.map((c) => c.close);
-    const hist: HistogramData[] = [];
-    const dif: LineData[] = [];
-    const dea: LineData[] = [];
-
-    for (let i = macdSlow + macdSignal; i <= closes.length; i++) {
-      const slice = closes.slice(0, i);
-      const result = macd(slice, macdFast, macdSlow, macdSignal);
-      if (!result) continue;
-      const t = candles[i - 1].time as Time;
-      hist.push({ time: t, value: result.hist, color: result.hist >= 0 ? LONG_COLOR : SHORT_COLOR });
-      dif.push({ time: t, value: result.dif });
-      dea.push({ time: t, value: result.dea });
-    }
-    return { hist, dif, dea };
-  }, [candles, macdFast, macdSlow, macdSignal]);
+  // 计算 MACD 数据：线性 EMA 递推，避免每根K线都从头 slice 重算
+  const macdData = useMemo(() => calcMacdSeries(visibleCandles, macdFast, macdSlow, macdSignal), [visibleCandles, macdFast, macdSlow, macdSignal]);
 
   // 创建主图图表
   useEffect(() => {
@@ -196,21 +224,41 @@ export default function ChartView() {
     };
   }, []);
 
-  // 更新数据
+  // 更新数据：初始加载/切换周期时全量 setData；实时 tick 只 update 最后一根，避免视觉上像强制刷新
   useEffect(() => {
-    if (!candleSeriesRef.current || !candles.length) return;
-    candleSeriesRef.current.setData(candleToLightweight(candles));
-    maFastSeriesRef.current?.setData(maFastData);
-    maSlowSeriesRef.current?.setData(maSlowData);
-    chartRef.current?.timeScale().fitContent();
+    if (!candleSeriesRef.current || !visibleCandles.length) return;
+    const firstTime = visibleCandles[0].time;
+    const lastTime = visibleCandles[visibleCandles.length - 1].time;
+    const fullSetKey = `${interval}-${historicalSource}-${visibleCandles.length}-${firstTime}`;
+    const shouldFullSet = lastFullSetKeyRef.current !== fullSetKey || lastCandleTimeRef.current === null || lastTime !== lastCandleTimeRef.current;
 
-    if (macdSeriesRef.current && macdData.hist.length) {
-      macdSeriesRef.current.setData(macdData.hist);
-      difSeriesRef.current?.setData(macdData.dif);
-      deaSeriesRef.current?.setData(macdData.dea);
-      macdChartRef.current?.timeScale().fitContent();
+    if (shouldFullSet) {
+      candleSeriesRef.current.setData(candleToLightweight(visibleCandles));
+      maFastSeriesRef.current?.setData(maFastData);
+      maSlowSeriesRef.current?.setData(maSlowData);
+      if (macdSeriesRef.current) {
+        macdSeriesRef.current.setData(macdData.hist);
+        difSeriesRef.current?.setData(macdData.dif);
+        deaSeriesRef.current?.setData(macdData.dea);
+      }
+      lastFullSetKeyRef.current = fullSetKey;
+    } else {
+      const last = visibleCandles[visibleCandles.length - 1];
+      candleSeriesRef.current.update({ time: last.time as Time, open: last.open, high: last.high, low: last.low, close: last.close });
+      const maFastLast = maFastData.at(-1);
+      const maSlowLast = maSlowData.at(-1);
+      const macdLast = macdData.hist.at(-1);
+      const difLast = macdData.dif.at(-1);
+      const deaLast = macdData.dea.at(-1);
+      if (maFastLast) maFastSeriesRef.current?.update(maFastLast);
+      if (maSlowLast) maSlowSeriesRef.current?.update(maSlowLast);
+      if (macdLast) macdSeriesRef.current?.update(macdLast);
+      if (difLast) difSeriesRef.current?.update(difLast);
+      if (deaLast) deaSeriesRef.current?.update(deaLast);
     }
-  }, [candles, maFastData, maSlowData, macdData]);
+
+    lastCandleTimeRef.current = lastTime;
+  }, [visibleCandles, maFastData, maSlowData, macdData, interval, historicalSource]);
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", gap: "0" }}>
@@ -254,7 +302,7 @@ export default function ChartView() {
         {/* 数据源切换 + 连接状态 */}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: "12px", fontSize: "11px" }}>
           <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--color-text-secondary)" }}>
-            <span>数据源</span>
+            <span>实时源</span>
             <select
               value={preferredSource}
               onChange={(e) => setPreferredSource(e.target.value as DataSourceName)}
@@ -274,6 +322,27 @@ export default function ChartView() {
               <option value="gate">Gate</option>
               <option value="binance">Binance</option>
               <option value="okx">OKX</option>
+            </select>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--color-text-secondary)" }}>
+            <span>历史源</span>
+            <select
+              value={historicalSource}
+              onChange={(e) => setHistoricalSource(e.target.value as HistoricalSourceName)}
+              style={{
+                backgroundColor: "var(--color-bg-base)",
+                border: "1px solid var(--color-border)",
+                color: "var(--color-text-primary)",
+                borderRadius: "4px",
+                padding: "4px 8px",
+                fontSize: "11px",
+                fontFamily: "var(--font-mono)",
+                cursor: "pointer",
+              }}
+            >
+              <option value="okx">OKX（长历史推荐）</option>
+              <option value="gate">Gate（仅近期）</option>
             </select>
           </div>
 

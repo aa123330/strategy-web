@@ -4,6 +4,7 @@ import type { StrategySignal } from "../strategies/dualMa";
 
 // === 数据源类型 ===
 export type DataSourceName = "auto" | "gate" | "binance" | "okx" | "fallback";
+export type HistoricalSourceName = "gate" | "okx";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error" | "disconnected";
 
 // === 市场数据状态 ===
@@ -13,6 +14,7 @@ interface MarketState {
   dataSource: string;
   activeSource: DataSourceName;
   preferredSource: DataSourceName;
+  historicalSource: HistoricalSourceName;
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
   lastUpdatedAt: number | null;
@@ -27,6 +29,7 @@ interface MarketState {
   setError: (e: string | null) => void;
   setActiveSource: (source: DataSourceName, error?: string | null) => void;
   setPreferredSource: (source: DataSourceName) => void;
+  setHistoricalSource: (source: HistoricalSourceName) => void;
   setConnectionStatus: (status: ConnectionStatus) => void;
   setConnectionError: (e: string | null) => void;
 }
@@ -37,6 +40,7 @@ export const useMarketStore = create<MarketState>((set) => ({
   dataSource: "gate",
   activeSource: "gate",
   preferredSource: "auto",
+  historicalSource: "okx",
   connectionStatus: "idle",
   connectionError: null,
   lastUpdatedAt: null,
@@ -60,6 +64,7 @@ export const useMarketStore = create<MarketState>((set) => ({
   setActiveSource: (source, error = null) =>
     set({ activeSource: source, connectionError: error }),
   setPreferredSource: (source) => set({ preferredSource: source, activeSource: source === "auto" ? "gate" : source }),
+  setHistoricalSource: (source) => set({ historicalSource: source }),
   setConnectionStatus: (status) => set({ connectionStatus: status }),
   setConnectionError: (e) => set({ connectionError: e }),
 }));
@@ -115,7 +120,15 @@ export const useStrategyStore = create<StrategyState>((set) => ({
 }));
 
 // === UI 状态 ===
-type Tab = "chart" | "signals";
+export type Tab = "chart" | "signals" | "backtest";
+
+function getInitialTab(): Tab {
+  if (typeof window === "undefined") return "chart";
+  const hashTab = window.location.hash.replace(/^#\/?/, "") as Tab;
+  if (["chart", "signals", "backtest"].includes(hashTab)) return hashTab;
+  const savedTab = window.localStorage.getItem("strategy-web.active-tab") as Tab | null;
+  return savedTab && ["chart", "signals", "backtest"].includes(savedTab) ? savedTab : "chart";
+}
 
 interface UIState {
   tab: Tab;
@@ -123,6 +136,12 @@ interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  tab: "chart",
-  setTab: (t) => set({ tab: t }),
+  tab: getInitialTab(),
+  setTab: (t) => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("strategy-web.active-tab", t);
+      window.history.replaceState(null, "", `#${t}`);
+    }
+    set({ tab: t });
+  },
 }));

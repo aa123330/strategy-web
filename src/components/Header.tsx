@@ -1,9 +1,10 @@
 import { useUIStore } from "../store";
-import { Activity, BarChart2, TrendingUp } from "lucide-react";
+import { Activity, BarChart2, TrendingUp, Database } from "lucide-react";
 
 const TABS = [
   { id: "chart" as const, label: "图表分析", icon: BarChart2 },
   { id: "signals" as const, label: "信号面板", icon: TrendingUp },
+  { id: "backtest" as const, label: "回测验证", icon: Database },
 ];
 
 export default function Header() {

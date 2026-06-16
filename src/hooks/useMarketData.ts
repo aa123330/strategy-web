@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { getContract, getTicker, type CandleRow } from "../services/gatePublicApi";
+import { getLocalCandles, normalizeLocalCandle } from "../services/localDataApi";
 import { GateWsClient, type GateInterval } from "../services/gateWs";
 import { BinanceWsClient, type BinanceInterval } from "../services/binanceWs";
 import { OkxWsClient, type OkxInterval } from "../services/okxWs";
@@ -11,6 +12,8 @@ type RealtimeSource = "gate" | "binance" | "okx";
 const SOURCE_ORDER: DataSourceName[] = ["gate", "binance", "okx", "fallback"];
 const INTERVALS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 const HTTP_REFRESH_MS = 10_000;
+const LOCAL_CHART_LIMIT = 1500;
+const REALTIME_UPDATE_THROTTLE_MS = 500;
 
 function normalizeInterval(raw: string) {
   return INTERVALS.includes(raw as (typeof INTERVALS)[number]) ? raw : "15m";
@@ -61,6 +64,7 @@ export function useMarketData() {
     activeSource,
     connectionStatus,
     dataSource,
+    historicalSource,
     setCandles,
     setContract,
     setLoading,
@@ -76,6 +80,9 @@ export function useMarketData() {
   const sourceIndexRef = useRef(0);
   const staleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fallbackTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingCandlesRef = useRef<CandleRow[] | null>(null);
+  const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastFlushTimeRef = useRef(0);
 
   const switchToNextSource = useCallback((reason: string) => {
     if (preferredSource !== "auto") return;
@@ -139,12 +146,45 @@ export function useMarketData() {
       };
     }
 
+    const flushCandles = () => {
+      if (cancelled || !pendingCandlesRef.current?.length) return;
+      const nextCandles = pendingCandlesRef.current;
+      pendingCandlesRef.current = null;
+      lastFlushTimeRef.current = Date.now();
+      setCandles(nextCandles, safeSource);
+      setConnectionError(null);
+    };
+
     const onUpdate = (candles: CandleRow[]) => {
       if (cancelled) return;
       if (!candles.length) return;
       lastDataTime.current = Date.now();
-      setCandles(candles, safeSource);
-      setConnectionError(null);
+      pendingCandlesRef.current = candles;
+      const elapsed = Date.now() - lastFlushTimeRef.current;
+      if (elapsed >= REALTIME_UPDATE_THROTTLE_MS) {
+        if (throttleTimerRef.current) {
+          clearTimeout(throttleTimerRef.current);
+          throttleTimerRef.current = null;
+        }
+        flushCandles();
+        return;
+      }
+      if (!throttleTimerRef.current) {
+        throttleTimerRef.current = setTimeout(() => {
+          throttleTimerRef.current = null;
+          flushCandles();
+        }, REALTIME_UPDATE_THROTTLE_MS - elapsed);
+      }
+    };
+
+    const loadLocalCandles = async () => {
+      const local = await getLocalCandles({ exchange: historicalSource, symbol: "ETH_USDT", interval: normalizedInterval, limit: LOCAL_CHART_LIMIT });
+      if (cancelled || !local?.candles.length) return [];
+      const candles = local.candles.map(normalizeLocalCandle);
+      lastDataTime.current = Date.now();
+      setCandles(candles, "local-db");
+      setConnectionError(`已加载 ${historicalSource.toUpperCase()} 本地长期K线 ${local.range.count} 根，实时数据继续由 ${safeSource} 推送`);
+      return candles;
     };
 
     const onStatus = (status: ConnectionStatus) => {
@@ -160,20 +200,26 @@ export function useMarketData() {
       }
     };
 
-    try {
-      const realtimeSource = safeSource as RealtimeSource;
-      if (realtimeSource === "binance") {
-        wsRef.current = new BinanceWsClient(normalizedInterval as BinanceInterval, onUpdate, onStatus);
-      } else if (realtimeSource === "okx") {
-        wsRef.current = new OkxWsClient(normalizedInterval as OkxInterval, onUpdate, onStatus);
-      } else {
-        wsRef.current = new GateWsClient(normalizedInterval as GateInterval, onUpdate, onStatus);
+    const connectRealtime = async () => {
+      try {
+        const initialCandles = await loadLocalCandles();
+        if (cancelled) return;
+        const realtimeSource = safeSource as RealtimeSource;
+        if (realtimeSource === "binance") {
+          wsRef.current = new BinanceWsClient(normalizedInterval as BinanceInterval, onUpdate, onStatus);
+        } else if (realtimeSource === "okx") {
+          wsRef.current = new OkxWsClient(normalizedInterval as OkxInterval, onUpdate, onStatus);
+        } else {
+          wsRef.current = new GateWsClient(normalizedInterval as GateInterval, onUpdate, onStatus, initialCandles);
+        }
+        wsRef.current.connect();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        switchToNextSource(`${safeSource} 初始化失败`);
       }
-      wsRef.current.connect();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      switchToNextSource(`${safeSource} 初始化失败`);
-    }
+    };
+
+    connectRealtime();
 
     return () => {
       cancelled = true;
@@ -183,8 +229,11 @@ export function useMarketData() {
       }
       if (fallbackTimerRef.current) clearInterval(fallbackTimerRef.current);
       fallbackTimerRef.current = null;
+      if (throttleTimerRef.current) clearTimeout(throttleTimerRef.current);
+      throttleTimerRef.current = null;
+      pendingCandlesRef.current = null;
     };
-  }, [interval, preferredSource, selectedSource, setActiveSource, setCandles, setConnectionError, setConnectionStatus, setError, setLoading, switchToNextSource]);
+  }, [historicalSource, interval, preferredSource, selectedSource, setActiveSource, setCandles, setConnectionError, setConnectionStatus, setError, setLoading, switchToNextSource]);
 
   useEffect(() => {
     if (staleTimerRef.current) clearInterval(staleTimerRef.current);
