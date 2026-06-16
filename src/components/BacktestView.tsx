@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { BarChart3, Database, RefreshCw } from "lucide-react";
-import { useMarketStore, useStrategyStore } from "../store";
-import { backfillLocalCandles, getBackfillJob, getLocalCandles, runBacktest, type BackfillJob, type BacktestMetrics, type BacktestResult, type CandleRange } from "../services/localDataApi";
+import { useMarketStore, useStrategyStore, type HigherTimeframe } from "../store";
+import { backfillLocalCandles, getBackfillJob, getLocalCandles, runBacktest, type BackfillJob, type BacktestMetrics, type BacktestResult, type CandleRange, type DirectionBreakdown, type TradeDirection } from "../services/localDataApi";
 
 const BACKFILL_JOB_STORAGE_KEY = "strategy-web.backfill-job";
 const BACKFILL_FORM_STORAGE_KEY = "strategy-web.backfill-form";
@@ -77,6 +77,15 @@ function reasonText(reason: string) {
   return map[reason] ?? reason;
 }
 
+function directionText(direction: TradeDirection) {
+  const map: Record<TradeDirection, string> = {
+    both: "双向",
+    long_only: "只做多",
+    short_only: "只做空",
+  };
+  return map[direction];
+}
+
 function MetricsGrid({ metrics, exitReasons }: { metrics: BacktestMetrics; exitReasons?: Record<string, number> }) {
   const reasonSummary = exitReasons && Object.keys(exitReasons).length
     ? Object.entries(exitReasons).map(([key, value]) => `${reasonText(key)} ${value}`).join(" / ")
@@ -103,6 +112,29 @@ interface PeriodComparisonRow {
   real: BacktestResult | null;
   ideal: BacktestResult | null;
   error?: string;
+}
+
+interface DirectionStabilityRow {
+  windowDays: number;
+  direction: TradeDirection;
+  result: BacktestResult | null;
+  error?: string;
+}
+
+interface HigherTimeframeWindowRow {
+  windowDays: number;
+  baseline: BacktestResult | null;
+  filtered: BacktestResult | null;
+  error?: string;
+}
+
+function resultDiagnosis(metrics: BacktestMetrics | undefined | null) {
+  if (!metrics) return "无数据";
+  if (metrics.trades < 8) return "交易太少";
+  if (metrics.totalReturn > 0 && metrics.profitFactor > 1.2) return "方向稳定有效";
+  if (metrics.totalReturn > 0 && metrics.profitFactor > 1) return "弱正期望";
+  if (metrics.profitFactor < 1 || metrics.totalReturn <= 0) return "方向拖累";
+  return "需更多样本";
 }
 
 function PeriodComparison({ rows, loading, onRun }: { rows: PeriodComparisonRow[]; loading: boolean; onRun: () => void }) {
@@ -172,6 +204,518 @@ function PeriodComparison({ rows, loading, onRun }: { rows: PeriodComparisonRow[
   );
 }
 
+function DirectionStability({ rows, loading, progress, onRun }: { rows: DirectionStabilityRow[]; loading: boolean; progress: string | null; onRun: () => void }) {
+  const longWins = rows.filter((row) => row.direction === "long_only" && row.result && row.result.split.test.metrics.totalReturn > 0 && row.result.split.test.metrics.profitFactor > 1).length;
+  const shortWins = rows.filter((row) => row.direction === "short_only" && row.result && row.result.split.test.metrics.totalReturn > 0 && row.result.split.test.metrics.profitFactor > 1).length;
+  const summary = rows.length ? `方向稳定性：只做多通过 ${longWins} 个窗口，只做空通过 ${shortWins} 个窗口。` : "";
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>方向稳定性分窗验证</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>固定 ETH_USDT / 1h / 双均线，分别用最近 90 / 180 / 270 / 360 天验证双向、只做多、只做空，避免被单一窗口误导。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "验证中..." : "运行方向稳定性验证"}
+        </button>
+      </div>
+      {summary && <div style={{ marginBottom: "10px", color: longWins >= shortWins ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{summary}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>窗口</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>方向</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={8} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行方向稳定性验证”开始分窗对比。</td></tr>}
+            {rows.map((row) => {
+              const metrics = row.result?.split.test.metrics;
+              const diagnosis = row.error ?? resultDiagnosis(metrics);
+              return (
+                <tr key={`${row.windowDays}-${row.direction}`}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.windowDays}天</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{directionText(row.direction)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? String(metrics.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: diagnosis.includes("有效") || diagnosis.includes("正期望") ? "var(--color-long)" : "#ffaa00" }}>{diagnosis}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+interface OptimizationRow {
+  minAdx: number;
+  longRsiMax: number;
+  shortRsiMin: number;
+  atrTrailMultiplier: number;
+  takeProfitAtrMultiplier: number;
+  tradeDirection: TradeDirection;
+  isCurrent?: boolean;
+  rank?: number;
+  real: BacktestResult | null;
+  ideal: BacktestResult | null;
+  score: number;
+  tags: string[];
+  robust: boolean;
+  error?: string;
+}
+
+interface DualMaOptimizationRow {
+  fastPeriod: number;
+  slowPeriod: number;
+  atrStopMultiplier: number;
+  atrTrailMultiplier: number;
+  takeProfitAtrMultiplier: number;
+  isCurrent?: boolean;
+  rank?: number;
+  real: BacktestResult | null;
+  ideal: BacktestResult | null;
+  score: number;
+  tags: string[];
+  robust: boolean;
+  error?: string;
+}
+
+interface HigherTimeframeOptimizationRow {
+  higherTimeframe: HigherTimeframe;
+  smaPeriod: number;
+  requireSlope: boolean;
+  isCurrent?: boolean;
+  rank?: number;
+  real: BacktestResult | null;
+  ideal: BacktestResult | null;
+  score: number;
+  tags: string[];
+  robust: boolean;
+  error?: string;
+}
+
+function scoreOptimization(real: BacktestResult | null) {
+  if (!real) return Number.NEGATIVE_INFINITY;
+  const metrics = real.split.test.metrics;
+  const boundedProfitFactor = Number.isFinite(metrics.profitFactor) ? Math.min(metrics.profitFactor, 3) : 3;
+  return boundedProfitFactor * 40 + metrics.totalReturn * 100 - Math.abs(metrics.maxDrawdown) * 50 + metrics.winRate * 10;
+}
+
+function diagnoseOptimization(real: BacktestResult | null, ideal: BacktestResult | null) {
+  if (!real) return { robust: false, tags: ["本地样本不足"] };
+  const train = real.split.train.metrics;
+  const test = real.split.test.metrics;
+  const idealTest = ideal?.split.test.metrics;
+  const tags: string[] = [];
+  const drawdownOk = test.maxDrawdown >= -0.1;
+  const enoughTrades = test.trades >= 8;
+  const positiveExpectancy = test.profitFactor > 1 && test.totalReturn > 0;
+  const trainTestSameDirection = train.totalReturn > 0 && test.totalReturn > 0;
+  const frictionGap = idealTest ? idealTest.totalReturn - test.totalReturn : 0;
+
+  if (positiveExpectancy && enoughTrades && drawdownOk && trainTestSameDirection) tags.push("稳健候选");
+  if (!enoughTrades) tags.push("交易太少");
+  if (!positiveExpectancy) tags.push("测试段未正期望");
+  if (!drawdownOk) tags.push("回撤偏高");
+  if (!trainTestSameDirection) tags.push("训练/测试不一致");
+  if (frictionGap > 0.08) tags.push("摩擦敏感");
+  if (test.winRate >= 0.45 && positiveExpectancy) tags.push("胜率改善");
+
+  return {
+    robust: positiveExpectancy && enoughTrades && drawdownOk && trainTestSameDirection,
+    tags,
+  };
+}
+
+function DefaultBenchmark({ benchmark, best }: { benchmark: BacktestResult | null; best: OptimizationRow | null }) {
+  const defaultMetrics = benchmark?.split.test.metrics;
+  const bestMetrics = best?.real?.split.test.metrics;
+  const beatDefault = !!defaultMetrics && !!bestMetrics && bestMetrics.totalReturn > defaultMetrics.totalReturn && bestMetrics.profitFactor >= defaultMetrics.profitFactor;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ fontSize: "13px", color: "var(--color-text-primary)", marginBottom: "6px", fontWeight: 600 }}>SMA+RSI 参数基准对照</div>
+      <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginBottom: "12px" }}>本面板只对应下方固定 SMA+RSI 优化，不代表当前页面选择的双均线策略。</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(120px, 1fr))", gap: "10px" }}>
+        <MetricCard label="SMA+RSI基准收益" value={defaultMetrics ? pct(defaultMetrics.totalReturn) : "--"} hint="SMA+RSI / 当前风控参数 / 真实模式" />
+        <MetricCard label="基准胜率" value={defaultMetrics ? pct(defaultMetrics.winRate) : "--"} />
+        <MetricCard label="基准PF" value={defaultMetrics ? num(defaultMetrics.profitFactor) : "--"} />
+        <MetricCard label="基准最大回撤" value={defaultMetrics ? pct(defaultMetrics.maxDrawdown) : "--"} />
+        <MetricCard label="优化是否超过基准" value={bestMetrics ? (beatDefault ? "是" : "否") : "--"} hint={bestMetrics ? `SMA+RSI第一名收益 ${pct(bestMetrics.totalReturn)} / PF ${num(bestMetrics.profitFactor)}` : "先运行SMA+RSI优化"} />
+      </div>
+      {bestMetrics && !beatDefault && <div style={{ marginTop: "10px", color: "#ffaa00", fontSize: "12px" }}>当前 SMA+RSI 优化第一名没有同时超过基准收益和 PF，暂不建议替换为这组参数。</div>}
+    </section>
+  );
+}
+
+function DirectionBreakdownTable({ breakdown }: { breakdown?: DirectionBreakdown }) {
+  const rows = [
+    { label: "做多", metrics: breakdown?.long },
+    { label: "做空", metrics: breakdown?.short },
+  ];
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ fontSize: "13px", color: "var(--color-text-primary)", marginBottom: "12px", fontWeight: 600 }}>多空拆分诊断</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>方向</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>平均单次</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const metrics = row.metrics;
+              const diagnosis = !metrics || metrics.trades === 0
+                ? "无交易"
+                : metrics.profitFactor > 1 && metrics.totalReturn > 0
+                  ? "方向有效"
+                  : "方向拖累";
+              return (
+                <tr key={row.label}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.label}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? String(metrics.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.averageReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: diagnosis === "方向有效" ? "var(--color-long)" : "#ffaa00" }}>{diagnosis}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function WalkForwardTable({ rows }: { rows?: BacktestResult["walkForward"] }) {
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ fontSize: "13px", color: "var(--color-text-primary)", marginBottom: "12px", fontWeight: 600 }}>Walk-forward 滚动样本外验证</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>窗口</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>测试收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>是否通过</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(!rows || rows.length === 0) && <tr><td colSpan={7} style={{ padding: "12px", textAlign: "center" }}>暂无滚动验证数据</td></tr>}
+            {rows?.map((row) => {
+              const metrics = row.result.metrics;
+              return (
+                <tr key={row.label}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.label}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{pct(metrics.totalReturn)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{num(metrics.profitFactor)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(metrics.winRate)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(metrics.maxDrawdown)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics.trades}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.passed ? "var(--color-long)" : "#ffaa00" }}>{row.passed ? "通过" : "未通过"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function ParameterOptimization({ rows, loading, progress, currentRank, activeStrategy, onRun }: { rows: OptimizationRow[]; loading: boolean; progress: string | null; currentRank: number | null; activeStrategy: string; onRun: () => void }) {
+  const best = rows[0];
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>SMA+RSI 1h 参数优化</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>固定 ETH_USDT / 1h / SMA+RSI，扫描 ADX、RSI 阈值、ATR追踪倍数、ATR止盈和交易方向；该结果与当前页面双均线回测分开解读。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "优化中..." : "运行1h参数优化"}
+        </button>
+      </div>
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {activeStrategy !== "sma_rsi_pullback" && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>当前页面选择的是双均线，SMA+RSI 当前参数排名不适用；请看下方“双均线只做空专项优化”。</div>}
+      {activeStrategy === "sma_rsi_pullback" && currentRank !== null && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>当前页面 SMA+RSI 参数在本轮候选中的排名：#{currentRank}。</div>}
+      {best?.real && <div style={{ marginBottom: "10px", color: best.robust ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>当前排名第一：{directionText(best.tradeDirection)}，ADX≥{best.minAdx}，多RSI≤{best.longRsiMax}，空RSI≥{best.shortRsiMin}，ATR追踪×{best.atrTrailMultiplier}，ATR止盈×{best.takeProfitAtrMultiplier}；真实收益 {pct(best.real.split.test.metrics.totalReturn)}，PF {num(best.real.split.test.metrics.profitFactor)}，{best.tags.join(" / ")}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>方向</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>参数组合</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>真实收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>理想收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>理想/真实差值</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={11} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行1h参数优化”开始扫描。建议先确保 OKX 已补充至少 180 天 1h 数据。</td></tr>
+            )}
+            {rows.map((row, index) => {
+              const real = row.real?.split.test.metrics;
+              const ideal = row.ideal?.split.test.metrics;
+              const gap = real && ideal ? ideal.totalReturn - real.totalReturn : null;
+              return (
+                <tr key={`${row.tradeDirection}-${row.minAdx}-${row.longRsiMax}-${row.shortRsiMin}-${row.atrTrailMultiplier}-${row.takeProfitAtrMultiplier}`}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "var(--color-text-primary)", fontWeight: 600 }}>#{row.rank ?? index + 1}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{directionText(row.tradeDirection)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)", color: row.isCurrent ? "var(--color-btn-primary)" : "var(--color-text-primary)" }}>ADX≥{row.minAdx} / 多≤{row.longRsiMax} / 空≥{row.shortRsiMin} / ATR追踪×{row.atrTrailMultiplier} / ATR止盈×{row.takeProfitAtrMultiplier}{row.isCurrent ? " / 当前" : ""}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{real ? pct(real.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{real ? num(real.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? String(real.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: ideal && ideal.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{ideal ? pct(ideal.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{gap === null ? "--" : pct(gap)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function HigherTimeframeWindowValidation({ rows, loading, progress, onRun }: { rows: HigherTimeframeWindowRow[]; loading: boolean; progress: string | null; onRun: () => void }) {
+  const improved = rows.filter((row) => {
+    const baseline = row.baseline?.split.test.metrics;
+    const filtered = row.filtered?.split.test.metrics;
+    return baseline && filtered && filtered.totalReturn > baseline.totalReturn && filtered.profitFactor >= baseline.profitFactor;
+  }).length;
+  const summary = rows.length ? `高周期过滤在 ${improved} / ${rows.length} 个窗口中同时改善收益与 PF。` : "";
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>高周期过滤分窗稳定性验证</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>用当前高周期过滤参数，对比最近 90 / 180 / 270 / 360 天的默认双向与过滤后表现，验证候选过滤器是否跨窗口稳定。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "验证中..." : "运行高周期分窗验证"}
+        </button>
+      </div>
+      {summary && <div style={{ marginBottom: "10px", color: improved >= Math.ceil(rows.length / 2) ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{summary}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>窗口</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>默认收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>过滤收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益改善</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>默认PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>过滤PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>默认回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>过滤回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>过滤交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={10} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行高周期分窗验证”开始对比当前过滤器。</td></tr>}
+            {rows.map((row) => {
+              const baseline = row.baseline?.split.test.metrics;
+              const filtered = row.filtered?.split.test.metrics;
+              const improvement = baseline && filtered ? filtered.totalReturn - baseline.totalReturn : null;
+              const diagnosis = row.error
+                ? row.error
+                : baseline && filtered && filtered.totalReturn > baseline.totalReturn && filtered.profitFactor >= baseline.profitFactor
+                  ? "收益/PF改善"
+                  : filtered && filtered.totalReturn > 0 && filtered.profitFactor > 1
+                    ? "过滤后正期望"
+                    : "未改善";
+              return (
+                <tr key={row.windowDays}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.windowDays}天</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: baseline && baseline.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{baseline ? pct(baseline.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: filtered && filtered.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{filtered ? pct(filtered.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: improvement !== null && improvement >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{improvement === null ? "--" : pct(improvement)}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline ? num(baseline.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: filtered && filtered.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{filtered ? num(filtered.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline ? pct(baseline.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{filtered ? pct(filtered.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{filtered ? String(filtered.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: diagnosis.includes("改善") || diagnosis.includes("正期望") ? "var(--color-long)" : "#ffaa00" }}>{diagnosis}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function HigherTimeframeOptimization({ rows, loading, progress, currentRank, onRun, onApply }: { rows: HigherTimeframeOptimizationRow[]; loading: boolean; progress: string | null; currentRank: number | null; onRun: () => void; onApply: (row: HigherTimeframeOptimizationRow) => void }) {
+  const best = rows[0];
+  const bestMetrics = best?.real?.split.test.metrics;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>高周期过滤参数优化</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>固定 ETH_USDT / 1h / 双均线 / 双向，扫描 4h/1d、SMA周期和是否要求斜率，用于自动寻找动态多空方向过滤组合。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "优化中..." : "运行高周期过滤优化"}
+        </button>
+      </div>
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {currentRank !== null && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>当前页面高周期过滤参数在本轮候选中的排名：#{currentRank}。</div>}
+      {bestMetrics && <div style={{ marginBottom: "10px", color: best?.robust ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>当前排名第一：{best.higherTimeframe} / SMA{best.smaPeriod} / {best.requireSlope ? "要求斜率" : "不要求斜率"}；真实收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，{best.tags.join(" / ")}</div>}
+      {best && <button onClick={() => onApply(best)} style={{ marginBottom: "10px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "rgba(26,115,232,0.14)", color: "var(--color-btn-primary)", cursor: "pointer" }}>一键应用当前第一名并重新验证</button>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>参数组合</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>真实收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>理想收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>多空拆分</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={10} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行高周期过滤优化”开始扫描 20 组动态方向过滤参数。</td></tr>}
+            {rows.map((row, index) => {
+              const real = row.real?.split.test.metrics;
+              const ideal = row.ideal?.split.test.metrics;
+              const breakdown = row.real?.split.test.directionBreakdown;
+              return (
+                <tr key={`${row.higherTimeframe}-${row.smaPeriod}-${row.requireSlope}`}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "var(--color-text-primary)", fontWeight: 600 }}>#{row.rank ?? index + 1}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)", color: row.isCurrent ? "var(--color-btn-primary)" : "var(--color-text-primary)" }}>{row.higherTimeframe} / SMA{row.smaPeriod} / {row.requireSlope ? "斜率确认" : "仅位置"}{row.isCurrent ? " / 当前" : ""}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{real ? pct(real.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{real ? num(real.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? String(real.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: ideal && ideal.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{ideal ? pct(ideal.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{breakdown ? `多 ${pct(breakdown.long.totalReturn)} / 空 ${pct(breakdown.short.totalReturn)}` : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function DualMaDirectionalOptimization({ title, description, emptyText, runButtonText, rows, benchmark, loading, progress, currentRank, direction, onRun, onApply }: { title: string; description: string; emptyText: string; runButtonText: string; rows: DualMaOptimizationRow[]; benchmark: BacktestResult | null; loading: boolean; progress: string | null; currentRank: number | null; direction: TradeDirection; onRun: () => void; onApply: (row: DualMaOptimizationRow, direction: TradeDirection) => void }) {
+  const best = rows[0];
+  const benchmarkMetrics = benchmark?.split.test.metrics;
+  const bestMetrics = best?.real?.split.test.metrics;
+  const beatBenchmark = !!benchmarkMetrics && !!bestMetrics && bestMetrics.totalReturn > benchmarkMetrics.totalReturn && bestMetrics.profitFactor >= benchmarkMetrics.profitFactor;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>{title}</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>{description}</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "优化中..." : runButtonText}
+        </button>
+      </div>
+      {benchmarkMetrics && <div style={{ marginBottom: "10px", color: "var(--color-text-secondary)", fontSize: "12px" }}>当前双均线{directionText(direction)}基准：收益 {pct(benchmarkMetrics.totalReturn)}，PF {num(benchmarkMetrics.profitFactor)}，胜率 {pct(benchmarkMetrics.winRate)}。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {currentRank !== null && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>当前页面双均线只做空参数在本轮候选中的排名：#{currentRank}。</div>}
+      {bestMetrics && <div style={{ marginBottom: "10px", color: best?.robust ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>当前排名第一：快线 {best.fastPeriod} / 慢线 {best.slowPeriod} / ATR止损×{best.atrStopMultiplier} / ATR追踪×{best.atrTrailMultiplier} / ATR止盈×{best.takeProfitAtrMultiplier}；真实收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，{best.tags.join(" / ")}</div>}
+      {bestMetrics && benchmarkMetrics && <div style={{ marginBottom: "10px", color: beatBenchmark ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{beatBenchmark ? "优化第一名已同时超过当前基准收益和 PF。" : "优化第一名未同时超过当前基准收益和 PF，暂不建议直接替换。"}</div>}
+      {best && <button onClick={() => onApply(best, direction)} style={{ marginBottom: "10px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "rgba(26,115,232,0.14)", color: "var(--color-btn-primary)", cursor: "pointer" }}>一键应用当前第一名并重新验证</button>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>参数组合</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>真实收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>理想收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={9} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>{emptyText}</td></tr>}
+            {rows.map((row, index) => {
+              const real = row.real?.split.test.metrics;
+              const ideal = row.ideal?.split.test.metrics;
+              return (
+                <tr key={`${row.fastPeriod}-${row.slowPeriod}-${row.atrStopMultiplier}-${row.atrTrailMultiplier}-${row.takeProfitAtrMultiplier}`}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "var(--color-text-primary)", fontWeight: 600 }}>#{row.rank ?? index + 1}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)", color: row.isCurrent ? "var(--color-btn-primary)" : "var(--color-text-primary)" }}>快{row.fastPeriod} / 慢{row.slowPeriod} / 止损×{row.atrStopMultiplier} / 追踪×{row.atrTrailMultiplier} / 止盈×{row.takeProfitAtrMultiplier}{row.isCurrent ? " / 当前" : ""}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{real ? pct(real.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: real && real.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{real ? num(real.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? pct(real.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{real ? String(real.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: ideal && ideal.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{ideal ? pct(ideal.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.robust ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function StrategyDiagnosis({ result, idealResult, interval }: { result: BacktestResult; idealResult: BacktestResult | null; interval: string }) {
   const real = result.split.test.metrics;
   const ideal = idealResult?.split.test.metrics;
@@ -227,8 +771,8 @@ function StrategyDiagnosis({ result, idealResult, interval }: { result: Backtest
 }
 
 export default function BacktestView() {
-  const { interval, historicalSource } = useMarketStore();
-  const { strategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars, setParams } = useStrategyStore();
+  const { interval, historicalSource, setInterval: setMarketInterval } = useMarketStore();
+  const { strategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, takeProfitAtrMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars, tradeDirection, useHigherTimeframeFilter, higherTimeframe, higherTimeframeSmaPeriod, requireHigherTimeframeSlope, signalDelayBars, conservativeSameBarExit, setStrategy, setParams } = useStrategyStore();
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [idealResult, setIdealResult] = useState<BacktestResult | null>(null);
   const [range, setRange] = useState<CandleRange | null>(null);
@@ -238,6 +782,31 @@ export default function BacktestView() {
   const [backfilling, setBackfilling] = useState(false);
   const [periodComparing, setPeriodComparing] = useState(false);
   const [periodRows, setPeriodRows] = useState<PeriodComparisonRow[]>([]);
+  const [directionStabilityLoading, setDirectionStabilityLoading] = useState(false);
+  const [directionStabilityRows, setDirectionStabilityRows] = useState<DirectionStabilityRow[]>([]);
+  const [directionStabilityProgress, setDirectionStabilityProgress] = useState<string | null>(null);
+  const [higherTimeframeOptimizing, setHigherTimeframeOptimizing] = useState(false);
+  const [higherTimeframeRows, setHigherTimeframeRows] = useState<HigherTimeframeOptimizationRow[]>([]);
+  const [higherTimeframeProgress, setHigherTimeframeProgress] = useState<string | null>(null);
+  const [currentHigherTimeframeRank, setCurrentHigherTimeframeRank] = useState<number | null>(null);
+  const [higherTimeframeWindowLoading, setHigherTimeframeWindowLoading] = useState(false);
+  const [higherTimeframeWindowRows, setHigherTimeframeWindowRows] = useState<HigherTimeframeWindowRow[]>([]);
+  const [higherTimeframeWindowProgress, setHigherTimeframeWindowProgress] = useState<string | null>(null);
+  const [optimizing, setOptimizing] = useState(false);
+  const [optimizationRows, setOptimizationRows] = useState<OptimizationRow[]>([]);
+  const [optimizationBenchmark, setOptimizationBenchmark] = useState<BacktestResult | null>(null);
+  const [optimizationProgress, setOptimizationProgress] = useState<string | null>(null);
+  const [currentOptimizationRank, setCurrentOptimizationRank] = useState<number | null>(null);
+  const [dualOptimizing, setDualOptimizing] = useState(false);
+  const [dualOptimizationRows, setDualOptimizationRows] = useState<DualMaOptimizationRow[]>([]);
+  const [dualOptimizationBenchmark, setDualOptimizationBenchmark] = useState<BacktestResult | null>(null);
+  const [dualOptimizationProgress, setDualOptimizationProgress] = useState<string | null>(null);
+  const [currentDualOptimizationRank, setCurrentDualOptimizationRank] = useState<number | null>(null);
+  const [dualLongOptimizing, setDualLongOptimizing] = useState(false);
+  const [dualLongOptimizationRows, setDualLongOptimizationRows] = useState<DualMaOptimizationRow[]>([]);
+  const [dualLongOptimizationBenchmark, setDualLongOptimizationBenchmark] = useState<BacktestResult | null>(null);
+  const [dualLongOptimizationProgress, setDualLongOptimizationProgress] = useState<string | null>(null);
+  const [currentDualLongOptimizationRank, setCurrentDualLongOptimizationRank] = useState<number | null>(null);
   const [backfillMessage, setBackfillMessage] = useState<string | null>(null);
   const [backfillJob, setBackfillJob] = useState<BackfillJob | null>(null);
   const savedForm = loadBackfillForm();
@@ -253,7 +822,7 @@ export default function BacktestView() {
       const local = await getLocalCandles({ exchange: historicalSource, symbol: "ETH_USDT", interval, limit: 1 });
       setRange(local?.range ?? null);
       const backtestStrategy: "dual_ma" | "sma_rsi_pullback" = strategy === "sma_rsi_pullback" ? "sma_rsi_pullback" : "dual_ma";
-      const commonParams = { exchange: historicalSource, symbol: "ETH_USDT", interval, strategy: backtestStrategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars };
+      const commonParams = { exchange: historicalSource, symbol: "ETH_USDT", interval, strategy: backtestStrategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, takeProfitAtrMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars, tradeDirection, useHigherTimeframeFilter, higherTimeframe, higherTimeframeSmaPeriod, requireHigherTimeframeSlope, signalDelayBars, conservativeSameBarExit };
       const [data, idealData] = await Promise.all([
         runBacktest(commonParams),
         runBacktest({ ...commonParams, minAdx: 0, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
@@ -279,7 +848,7 @@ export default function BacktestView() {
     } finally {
       setLoading(false);
     }
-  }, [adxPeriod, atrPeriod, atrStopMultiplier, atrTrailMultiplier, cooldownBars, fastPeriod, feeRate, historicalSource, interval, longRsiMax, maxHoldBars, minAdx, rsiPeriod, shortRsiMin, slippageRate, slowPeriod, strategy, useTrailingStop]);
+  }, [adxPeriod, atrPeriod, atrStopMultiplier, atrTrailMultiplier, cooldownBars, fastPeriod, feeRate, historicalSource, interval, longRsiMax, maxHoldBars, minAdx, rsiPeriod, shortRsiMin, slippageRate, slowPeriod, strategy, takeProfitAtrMultiplier, tradeDirection, useHigherTimeframeFilter, higherTimeframe, higherTimeframeSmaPeriod, requireHigherTimeframeSlope, signalDelayBars, conservativeSameBarExit, useTrailingStop]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -336,7 +905,7 @@ export default function BacktestView() {
     const backtestStrategy: "dual_ma" | "sma_rsi_pullback" = strategy === "sma_rsi_pullback" ? "sma_rsi_pullback" : "dual_ma";
     const intervals = ["15m", "1h", "4h"];
     const rows = await Promise.all(intervals.map(async (targetInterval) => {
-      const commonParams = { exchange: historicalSource, symbol: "ETH_USDT", interval: targetInterval, strategy: backtestStrategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars };
+      const commonParams = { exchange: historicalSource, symbol: "ETH_USDT", interval: targetInterval, strategy: backtestStrategy, fastPeriod, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, atrStopMultiplier, atrTrailMultiplier, takeProfitAtrMultiplier, useTrailingStop, feeRate, slippageRate, cooldownBars, maxHoldBars, tradeDirection, signalDelayBars, conservativeSameBarExit };
       const [real, ideal] = await Promise.all([
         runBacktest(commonParams),
         runBacktest({ ...commonParams, minAdx: 0, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
@@ -345,6 +914,577 @@ export default function BacktestView() {
     }));
     setPeriodRows(rows);
     setPeriodComparing(false);
+  };
+
+  const runDirectionStability = async () => {
+    setDirectionStabilityLoading(true);
+    setDirectionStabilityRows([]);
+    setDirectionStabilityProgress("准备验证 12 个方向窗口组合...");
+    const windows = [90, 180, 270, 360];
+    const directions: TradeDirection[] = ["both", "long_only", "short_only"];
+    const combinations = windows.flatMap((windowDays) => directions.map((direction) => ({ windowDays, direction })));
+    const rows: DirectionStabilityRow[] = [];
+    for (let index = 0; index < combinations.length; index += 3) {
+      const batch = combinations.slice(index, index + 3);
+      setDirectionStabilityProgress(`正在验证 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 个方向窗口组合...`);
+      const batchRows = await Promise.all(batch.map(async ({ windowDays, direction }) => {
+        const result = await runBacktest({
+          exchange: historicalSource,
+          symbol: "ETH_USDT",
+          interval: "1h",
+          limit: windowDays * 24,
+          trainRatio: 0.01,
+          strategy: "dual_ma",
+          fastPeriod,
+          slowPeriod,
+          rsiPeriod,
+          longRsiMax,
+          shortRsiMin,
+          adxPeriod,
+          minAdx,
+          atrPeriod,
+          atrStopMultiplier,
+          atrTrailMultiplier,
+          takeProfitAtrMultiplier,
+          useTrailingStop,
+          feeRate,
+          slippageRate,
+          cooldownBars,
+          maxHoldBars,
+          tradeDirection: direction,
+          useHigherTimeframeFilter,
+          higherTimeframe,
+          higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope,
+          signalDelayBars,
+          conservativeSameBarExit,
+        });
+        return { windowDays, direction, result, error: result ? undefined : "样本不足" };
+      }));
+      rows.push(...batchRows);
+      setDirectionStabilityRows([...rows]);
+    }
+    setDirectionStabilityProgress(`方向稳定性验证完成：已验证 ${combinations.length} 个组合。`);
+    setDirectionStabilityLoading(false);
+  };
+
+  const runHigherTimeframeWindowValidation = async () => {
+    setHigherTimeframeWindowLoading(true);
+    setHigherTimeframeWindowRows([]);
+    setHigherTimeframeWindowProgress("准备验证 4 个分窗...");
+    const windows = [90, 180, 270, 360];
+    const rows: HigherTimeframeWindowRow[] = [];
+    for (let index = 0; index < windows.length; index += 1) {
+      const windowDays = windows[index];
+      setHigherTimeframeWindowProgress(`正在验证 ${index + 1} / ${windows.length} 个窗口：最近 ${windowDays} 天...`);
+      const commonBase = {
+        exchange: historicalSource,
+        symbol: "ETH_USDT",
+        interval: "1h",
+        limit: windowDays * 24,
+        trainRatio: 0.01,
+        strategy: "dual_ma" as const,
+        fastPeriod,
+        slowPeriod,
+        rsiPeriod,
+        longRsiMax,
+        shortRsiMin,
+        adxPeriod,
+        minAdx,
+        atrPeriod,
+        atrStopMultiplier,
+        atrTrailMultiplier,
+        takeProfitAtrMultiplier,
+        useTrailingStop,
+        feeRate,
+        slippageRate,
+        cooldownBars,
+        maxHoldBars,
+        signalDelayBars,
+        conservativeSameBarExit,
+      };
+      const [baseline, filtered] = await Promise.all([
+        runBacktest({ ...commonBase, tradeDirection: "both", useHigherTimeframeFilter: false }),
+        runBacktest({
+          ...commonBase,
+          tradeDirection: "both",
+          useHigherTimeframeFilter: true,
+          higherTimeframe,
+          higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope,
+        }),
+      ]);
+      rows.push({ windowDays, baseline, filtered, error: baseline && filtered ? undefined : "样本不足" });
+      setHigherTimeframeWindowRows([...rows]);
+    }
+    setHigherTimeframeWindowProgress(`高周期过滤分窗验证完成：已验证 ${windows.length} 个窗口。`);
+    setHigherTimeframeWindowLoading(false);
+  };
+
+  const runHigherTimeframeOptimization = async () => {
+    setHigherTimeframeOptimizing(true);
+    setHigherTimeframeRows([]);
+    setCurrentHigherTimeframeRank(null);
+    setHigherTimeframeProgress("准备扫描 20 组高周期过滤参数...");
+    const timeframeValues: HigherTimeframe[] = ["4h", "1d"];
+    const smaValues = [20, 30, 50, 80, 100];
+    const slopeValues = [false, true];
+    const combinations = timeframeValues.flatMap((targetHigherTimeframe) =>
+      smaValues.flatMap((targetSmaPeriod) =>
+        slopeValues.map((targetRequireSlope) => ({
+          higherTimeframe: targetHigherTimeframe,
+          smaPeriod: targetSmaPeriod,
+          requireSlope: targetRequireSlope,
+        }))
+      )
+    );
+    const rows: HigherTimeframeOptimizationRow[] = [];
+
+    for (let index = 0; index < combinations.length; index += 4) {
+      const batch = combinations.slice(index, index + 4);
+      setHigherTimeframeProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组高周期过滤参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const commonParams = {
+          exchange: historicalSource,
+          symbol: "ETH_USDT",
+          interval: "1h",
+          strategy: "dual_ma" as const,
+          fastPeriod,
+          slowPeriod,
+          rsiPeriod,
+          longRsiMax,
+          shortRsiMin,
+          adxPeriod,
+          minAdx,
+          atrPeriod,
+          atrStopMultiplier,
+          atrTrailMultiplier,
+          takeProfitAtrMultiplier,
+          useTrailingStop,
+          feeRate,
+          slippageRate,
+          cooldownBars,
+          maxHoldBars,
+          tradeDirection: "both" as const,
+          useHigherTimeframeFilter: true,
+          higherTimeframe: combo.higherTimeframe,
+          higherTimeframeSmaPeriod: combo.smaPeriod,
+          requireHigherTimeframeSlope: combo.requireSlope,
+          signalDelayBars,
+          conservativeSameBarExit,
+        };
+        const [real, ideal] = await Promise.all([
+          runBacktest(commonParams),
+          runBacktest({ ...commonParams, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
+        ]);
+        const diagnosis = diagnoseOptimization(real, ideal);
+        return {
+          ...combo,
+          real,
+          ideal,
+          score: scoreOptimization(real),
+          tags: diagnosis.tags,
+          robust: diagnosis.robust,
+          error: real ? undefined : "本地样本不足",
+          isCurrent: useHigherTimeframeFilter && tradeDirection === "both" && combo.higherTimeframe === higherTimeframe && combo.smaPeriod === higherTimeframeSmaPeriod && combo.requireSlope === requireHigherTimeframeSlope,
+        };
+      }));
+      rows.push(...batchRows);
+      setHigherTimeframeRows([...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).slice(0, 10));
+    }
+
+    const sortedAll = [...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).map((row, index) => ({ ...row, rank: index + 1 }));
+    const currentIndex = sortedAll.findIndex((row) => row.isCurrent);
+    setCurrentHigherTimeframeRank(currentIndex >= 0 ? currentIndex + 1 : null);
+    const topRows = sortedAll.slice(0, 10);
+    const currentRow = currentIndex >= 10 ? sortedAll[currentIndex] : null;
+    setHigherTimeframeRows(currentRow ? [...topRows, currentRow] : topRows);
+    setHigherTimeframeProgress(`高周期过滤优化完成：已扫描 ${combinations.length} 组参数，优先展示稳健候选、综合评分前 10 名${useHigherTimeframeFilter && tradeDirection === "both" ? "和当前页面参数" : "；当前页面未启用双向高周期过滤，当前排名不适用"}。`);
+    setHigherTimeframeOptimizing(false);
+  };
+
+  const applyHigherTimeframeBest = (row: HigherTimeframeOptimizationRow) => {
+    setMarketInterval("1h");
+    setStrategy("dual_ma");
+    setParams({
+      tradeDirection: "both",
+      useHigherTimeframeFilter: true,
+      higherTimeframe: row.higherTimeframe,
+      higherTimeframeSmaPeriod: row.smaPeriod,
+      requireHigherTimeframeSlope: row.requireSlope,
+    });
+    setValidationMessage(`已应用高周期过滤第一名：${row.higherTimeframe} / SMA${row.smaPeriod} / ${row.requireSlope ? "斜率确认" : "仅位置"}，正在重新验证主回测...`);
+  };
+
+  const runParameterOptimization = async () => {
+    setOptimizing(true);
+    setOptimizationRows([]);
+    setOptimizationBenchmark(null);
+    setCurrentOptimizationRank(null);
+    setOptimizationProgress("准备扫描 1215 组参数...");
+    const tradeDirectionValues: TradeDirection[] = ["both", "long_only", "short_only"];
+    const minAdxValues = [15, 18, 20];
+    const longRsiValues = [38, 40, 42];
+    const shortRsiValues = [58, 60, 62];
+    const atrTrailValues = [3.0, 3.5, 4.0];
+    const takeProfitAtrValues = [0, 1.8, 2.2, 2.6, 3.0];
+    const combinations = tradeDirectionValues.flatMap((targetTradeDirection) =>
+      minAdxValues.flatMap((targetMinAdx) =>
+        longRsiValues.flatMap((targetLongRsiMax) =>
+          shortRsiValues.flatMap((targetShortRsiMin) =>
+            atrTrailValues.flatMap((targetAtrTrailMultiplier) =>
+              takeProfitAtrValues.map((targetTakeProfitAtrMultiplier) => ({
+                tradeDirection: targetTradeDirection,
+                minAdx: targetMinAdx,
+                longRsiMax: targetLongRsiMax,
+                shortRsiMin: targetShortRsiMin,
+                atrTrailMultiplier: targetAtrTrailMultiplier,
+                takeProfitAtrMultiplier: targetTakeProfitAtrMultiplier,
+              }))
+            )
+          )
+        )
+      )
+    );
+    const rows: OptimizationRow[] = [];
+    const benchmark = await runBacktest({
+      exchange: historicalSource,
+      symbol: "ETH_USDT",
+      interval: "1h",
+      strategy: "sma_rsi_pullback",
+      fastPeriod,
+      slowPeriod,
+      rsiPeriod,
+      longRsiMax,
+      shortRsiMin,
+      adxPeriod,
+      minAdx,
+      atrPeriod,
+      atrStopMultiplier,
+      atrTrailMultiplier,
+      takeProfitAtrMultiplier,
+      useTrailingStop,
+      feeRate,
+      slippageRate,
+      cooldownBars,
+      maxHoldBars,
+          tradeDirection,
+          useHigherTimeframeFilter,
+          higherTimeframe,
+          higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope,
+          signalDelayBars,
+          conservativeSameBarExit,
+        });
+    setOptimizationBenchmark(benchmark);
+    const batchSize = 6;
+
+    for (let index = 0; index < combinations.length; index += batchSize) {
+      const batch = combinations.slice(index, index + batchSize);
+      setOptimizationProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const commonParams = {
+          exchange: historicalSource,
+          symbol: "ETH_USDT",
+          interval: "1h",
+          strategy: "sma_rsi_pullback" as const,
+          fastPeriod,
+          slowPeriod,
+          rsiPeriod,
+          longRsiMax: combo.longRsiMax,
+          shortRsiMin: combo.shortRsiMin,
+          adxPeriod,
+          minAdx: combo.minAdx,
+          atrPeriod,
+          atrStopMultiplier,
+          atrTrailMultiplier: combo.atrTrailMultiplier,
+          takeProfitAtrMultiplier: combo.takeProfitAtrMultiplier,
+          useTrailingStop,
+          feeRate,
+          slippageRate,
+          cooldownBars,
+          maxHoldBars,
+          tradeDirection: combo.tradeDirection,
+        };
+        const [real, ideal] = await Promise.all([
+          runBacktest(commonParams),
+          runBacktest({ ...commonParams, minAdx: 0, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
+        ]);
+        const diagnosis = diagnoseOptimization(real, ideal);
+        return {
+          ...combo,
+          real,
+          ideal,
+          score: scoreOptimization(real),
+          tags: diagnosis.tags,
+          robust: diagnosis.robust,
+          error: real ? undefined : "本地样本不足",
+          isCurrent: strategy === "sma_rsi_pullback" && combo.tradeDirection === tradeDirection && combo.minAdx === minAdx && combo.longRsiMax === longRsiMax && combo.shortRsiMin === shortRsiMin && combo.atrTrailMultiplier === atrTrailMultiplier && combo.takeProfitAtrMultiplier === takeProfitAtrMultiplier,
+        };
+      }));
+      rows.push(...batchRows);
+      const sorted = [...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).slice(0, 10);
+      setOptimizationRows(sorted);
+    }
+
+    const sortedAll = [...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).map((row, index) => ({ ...row, rank: index + 1 }));
+    const currentIndex = sortedAll.findIndex((row) => row.isCurrent);
+    setCurrentOptimizationRank(currentIndex >= 0 ? currentIndex + 1 : null);
+    const topRows = sortedAll.slice(0, 10);
+    const currentRow = currentIndex >= 10 ? sortedAll[currentIndex] : null;
+    setOptimizationRows(currentRow ? [...topRows, currentRow] : topRows);
+    setOptimizationProgress(`优化完成：已扫描 ${combinations.length} 组参数，优先展示稳健候选、综合评分前 10 名${strategy === "sma_rsi_pullback" ? "和当前页面参数" : "；当前页面为双均线，SMA+RSI当前排名不适用"}。`);
+    setOptimizing(false);
+  };
+
+  const runDualMaOptimization = async () => {
+    setDualOptimizing(true);
+    setDualOptimizationRows([]);
+    setDualOptimizationBenchmark(null);
+    setCurrentDualOptimizationRank(null);
+    const fastValues = [8, 10, 12, 15, 20];
+    const slowValues = [30, 40, 50, 60];
+    const atrStopValues = [1.5, 1.8, 2.2];
+    const atrTrailValues = [3.0, 3.5, 4.0];
+    const takeProfitAtrValues = [0, 1.8, 2.2];
+    const combinations = fastValues.flatMap((targetFastPeriod) =>
+      slowValues.flatMap((targetSlowPeriod) =>
+        atrStopValues.flatMap((targetAtrStopMultiplier) =>
+          atrTrailValues.flatMap((targetAtrTrailMultiplier) =>
+            takeProfitAtrValues.map((targetTakeProfitAtrMultiplier) => ({
+              fastPeriod: targetFastPeriod,
+              slowPeriod: targetSlowPeriod,
+              atrStopMultiplier: targetAtrStopMultiplier,
+              atrTrailMultiplier: targetAtrTrailMultiplier,
+              takeProfitAtrMultiplier: targetTakeProfitAtrMultiplier,
+            }))
+          )
+        )
+      )
+    );
+    setDualOptimizationProgress(`准备扫描 ${combinations.length} 组双均线只做空参数...`);
+    const benchmark = await runBacktest({
+      exchange: historicalSource,
+      symbol: "ETH_USDT",
+      interval: "1h",
+      strategy: "dual_ma",
+      fastPeriod,
+      slowPeriod,
+      rsiPeriod,
+      longRsiMax,
+      shortRsiMin,
+      adxPeriod,
+      minAdx,
+      atrPeriod,
+      atrStopMultiplier,
+      atrTrailMultiplier,
+      takeProfitAtrMultiplier,
+      useTrailingStop,
+      feeRate,
+      slippageRate,
+      cooldownBars,
+      maxHoldBars,
+      tradeDirection: "short_only",
+      useHigherTimeframeFilter,
+      higherTimeframe,
+      higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope,
+      signalDelayBars,
+      conservativeSameBarExit,
+    });
+    setDualOptimizationBenchmark(benchmark);
+
+    const rows: DualMaOptimizationRow[] = [];
+    const batchSize = 6;
+    for (let index = 0; index < combinations.length; index += batchSize) {
+      const batch = combinations.slice(index, index + batchSize);
+      setDualOptimizationProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组双均线参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const commonParams = {
+          exchange: historicalSource,
+          symbol: "ETH_USDT",
+          interval: "1h",
+          strategy: "dual_ma" as const,
+          fastPeriod: combo.fastPeriod,
+          slowPeriod: combo.slowPeriod,
+          rsiPeriod,
+          longRsiMax,
+          shortRsiMin,
+          adxPeriod,
+          minAdx,
+          atrPeriod,
+          atrStopMultiplier: combo.atrStopMultiplier,
+          atrTrailMultiplier: combo.atrTrailMultiplier,
+          takeProfitAtrMultiplier: combo.takeProfitAtrMultiplier,
+          useTrailingStop,
+          feeRate,
+          slippageRate,
+          cooldownBars,
+          maxHoldBars,
+          tradeDirection: "short_only" as const,
+          useHigherTimeframeFilter,
+          higherTimeframe,
+          higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope,
+          signalDelayBars,
+          conservativeSameBarExit,
+        };
+        const [real, ideal] = await Promise.all([
+          runBacktest(commonParams),
+          runBacktest({ ...commonParams, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
+        ]);
+        const diagnosis = diagnoseOptimization(real, ideal);
+        return {
+          ...combo,
+          real,
+          ideal,
+          score: scoreOptimization(real),
+          tags: diagnosis.tags,
+          robust: diagnosis.robust,
+          error: real ? undefined : "本地样本不足",
+          isCurrent: strategy !== "sma_rsi_pullback" && tradeDirection === "short_only" && combo.fastPeriod === fastPeriod && combo.slowPeriod === slowPeriod && combo.atrStopMultiplier === atrStopMultiplier && combo.atrTrailMultiplier === atrTrailMultiplier && combo.takeProfitAtrMultiplier === takeProfitAtrMultiplier,
+        };
+      }));
+      rows.push(...batchRows);
+      setDualOptimizationRows([...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).slice(0, 10));
+    }
+
+    const sortedAll = [...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).map((row, index) => ({ ...row, rank: index + 1 }));
+    const currentIndex = sortedAll.findIndex((row) => row.isCurrent);
+    setCurrentDualOptimizationRank(currentIndex >= 0 ? currentIndex + 1 : null);
+    const topRows = sortedAll.slice(0, 10);
+    const currentRow = currentIndex >= 10 ? sortedAll[currentIndex] : null;
+    setDualOptimizationRows(currentRow ? [...topRows, currentRow] : topRows);
+    setDualOptimizationProgress(`双均线优化完成：已扫描 ${combinations.length} 组参数，优先展示稳健候选、综合评分前 10 名和当前页面参数。`);
+    setDualOptimizing(false);
+  };
+
+  const runDualMaLongOptimization = async () => {
+    setDualLongOptimizing(true);
+    setDualLongOptimizationRows([]);
+    setDualLongOptimizationBenchmark(null);
+    setCurrentDualLongOptimizationRank(null);
+    const fastValues = [8, 10, 12, 15, 20];
+    const slowValues = [30, 40, 50, 60];
+    const atrStopValues = [1.5, 1.8, 2.2];
+    const atrTrailValues = [3.0, 3.5, 4.0];
+    const takeProfitAtrValues = [0, 1.8, 2.2];
+    const combinations = fastValues.flatMap((targetFastPeriod) =>
+      slowValues.flatMap((targetSlowPeriod) =>
+        atrStopValues.flatMap((targetAtrStopMultiplier) =>
+          atrTrailValues.flatMap((targetAtrTrailMultiplier) =>
+            takeProfitAtrValues.map((targetTakeProfitAtrMultiplier) => ({
+              fastPeriod: targetFastPeriod,
+              slowPeriod: targetSlowPeriod,
+              atrStopMultiplier: targetAtrStopMultiplier,
+              atrTrailMultiplier: targetAtrTrailMultiplier,
+              takeProfitAtrMultiplier: targetTakeProfitAtrMultiplier,
+            }))
+          )
+        )
+      )
+    );
+    setDualLongOptimizationProgress(`准备扫描 ${combinations.length} 组双均线只做多参数...`);
+    const benchmark = await runBacktest({
+      exchange: historicalSource,
+      symbol: "ETH_USDT",
+      interval: "1h",
+      strategy: "dual_ma",
+      fastPeriod,
+      slowPeriod,
+      rsiPeriod,
+      longRsiMax,
+      shortRsiMin,
+      adxPeriod,
+      minAdx,
+      atrPeriod,
+      atrStopMultiplier,
+      atrTrailMultiplier,
+      takeProfitAtrMultiplier,
+      useTrailingStop,
+      feeRate,
+      slippageRate,
+      cooldownBars,
+      maxHoldBars,
+      tradeDirection: "long_only",
+      signalDelayBars,
+      conservativeSameBarExit,
+    });
+    setDualLongOptimizationBenchmark(benchmark);
+
+    const rows: DualMaOptimizationRow[] = [];
+    const batchSize = 6;
+    for (let index = 0; index < combinations.length; index += batchSize) {
+      const batch = combinations.slice(index, index + batchSize);
+      setDualLongOptimizationProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组双均线只做多参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const commonParams = {
+          exchange: historicalSource,
+          symbol: "ETH_USDT",
+          interval: "1h",
+          strategy: "dual_ma" as const,
+          fastPeriod: combo.fastPeriod,
+          slowPeriod: combo.slowPeriod,
+          rsiPeriod,
+          longRsiMax,
+          shortRsiMin,
+          adxPeriod,
+          minAdx,
+          atrPeriod,
+          atrStopMultiplier: combo.atrStopMultiplier,
+          atrTrailMultiplier: combo.atrTrailMultiplier,
+          takeProfitAtrMultiplier: combo.takeProfitAtrMultiplier,
+          useTrailingStop,
+          feeRate,
+          slippageRate,
+          cooldownBars,
+          maxHoldBars,
+          tradeDirection: "long_only" as const,
+          signalDelayBars,
+          conservativeSameBarExit,
+        };
+        const [real, ideal] = await Promise.all([
+          runBacktest(commonParams),
+          runBacktest({ ...commonParams, useTrailingStop: false, feeRate: 0, slippageRate: 0, cooldownBars: 0, maxHoldBars: 0 }),
+        ]);
+        const diagnosis = diagnoseOptimization(real, ideal);
+        return {
+          ...combo,
+          real,
+          ideal,
+          score: scoreOptimization(real),
+          tags: diagnosis.tags,
+          robust: diagnosis.robust,
+          error: real ? undefined : "本地样本不足",
+          isCurrent: strategy !== "sma_rsi_pullback" && tradeDirection === "long_only" && combo.fastPeriod === fastPeriod && combo.slowPeriod === slowPeriod && combo.atrStopMultiplier === atrStopMultiplier && combo.atrTrailMultiplier === atrTrailMultiplier && combo.takeProfitAtrMultiplier === takeProfitAtrMultiplier,
+        };
+      }));
+      rows.push(...batchRows);
+      setDualLongOptimizationRows([...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).slice(0, 10));
+    }
+
+    const sortedAll = [...rows].sort((a, b) => Number(b.robust) - Number(a.robust) || b.score - a.score).map((row, index) => ({ ...row, rank: index + 1 }));
+    const currentIndex = sortedAll.findIndex((row) => row.isCurrent);
+    setCurrentDualLongOptimizationRank(currentIndex >= 0 ? currentIndex + 1 : null);
+    const topRows = sortedAll.slice(0, 10);
+    const currentRow = currentIndex >= 10 ? sortedAll[currentIndex] : null;
+    setDualLongOptimizationRows(currentRow ? [...topRows, currentRow] : topRows);
+    setDualLongOptimizationProgress(`双均线只做多优化完成：已扫描 ${combinations.length} 组参数，优先展示稳健候选、综合评分前 10 名和当前页面参数。`);
+    setDualLongOptimizing(false);
+  };
+
+  const applyDualMaBest = (row: DualMaOptimizationRow, direction: TradeDirection) => {
+    setMarketInterval("1h");
+    setStrategy("dual_ma");
+    setParams({
+      fastPeriod: row.fastPeriod,
+      slowPeriod: row.slowPeriod,
+      atrStopMultiplier: row.atrStopMultiplier,
+      atrTrailMultiplier: row.atrTrailMultiplier,
+      takeProfitAtrMultiplier: row.takeProfitAtrMultiplier,
+      tradeDirection: direction,
+    });
+    setValidationMessage(`已应用双均线${directionText(direction)}优化第一名，并切换到 ETH_USDT / 1h / 双均线 / ${directionText(direction)}，正在重新验证主回测...`);
   };
 
   const runBackfill = async () => {
@@ -393,13 +1533,40 @@ export default function BacktestView() {
       <div style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px", display: "flex", flexDirection: "column", gap: "12px" }}>
         <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>回测风控参数</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(100px, 1fr))", gap: "10px" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", color: "var(--color-text-secondary)", fontSize: "11px" }}>
+            <span>交易方向</span>
+            <select value={tradeDirection} onChange={(e) => setParams({ tradeDirection: e.target.value as TradeDirection })} style={{ width: "100%", boxSizing: "border-box" }}>
+              <option value="both">双向</option>
+              <option value="long_only">只做多</option>
+              <option value="short_only">只做空</option>
+            </select>
+          </label>
           <ParamInput label="最小ADX" value={minAdx} onChange={(v) => setParams({ minAdx: v })} min={10} max={45} step={1} />
           <ParamInput label="ATR止损倍数" value={atrStopMultiplier} onChange={(v) => setParams({ atrStopMultiplier: v })} min={0.5} max={5} step={0.1} />
           <ParamInput label="ATR追踪倍数" value={atrTrailMultiplier} onChange={(v) => setParams({ atrTrailMultiplier: v })} min={0.5} max={6} step={0.1} />
+          <ParamInput label="ATR止盈倍数" value={takeProfitAtrMultiplier} onChange={(v) => setParams({ takeProfitAtrMultiplier: v })} min={0} max={6} step={0.1} />
           <ParamInput label="手续费率" value={feeRate} onChange={(v) => setParams({ feeRate: v })} min={0} max={0.005} step={0.0001} />
           <ParamInput label="滑点率" value={slippageRate} onChange={(v) => setParams({ slippageRate: v })} min={0} max={0.005} step={0.0001} />
           <ParamInput label="冷却K线" value={cooldownBars} onChange={(v) => setParams({ cooldownBars: v })} min={0} max={50} step={1} />
           <ParamInput label="最大持仓K线" value={maxHoldBars} onChange={(v) => setParams({ maxHoldBars: v })} min={0} max={500} step={1} />
+          <label style={{ display: "flex", flexDirection: "column", gap: "4px", color: "var(--color-text-secondary)", fontSize: "11px" }}>
+            <span>高周期过滤</span>
+            <select value={higherTimeframe} onChange={(e) => setParams({ higherTimeframe: e.target.value as HigherTimeframe })} disabled={!useHigherTimeframeFilter} style={{ width: "100%", boxSizing: "border-box" }}>
+              <option value="4h">4h趋势</option>
+              <option value="1d">1d趋势</option>
+            </select>
+          </label>
+          <ParamInput label="高周期SMA" value={higherTimeframeSmaPeriod} onChange={(v) => setParams({ higherTimeframeSmaPeriod: v })} min={10} max={200} step={1} />
+          <ParamInput label="信号延迟K线" value={signalDelayBars} onChange={(v) => setParams({ signalDelayBars: v })} min={0} max={5} step={1} />
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--color-text-secondary)", fontSize: "12px" }}>
+            <input type="checkbox" checked={useHigherTimeframeFilter} onChange={(e) => setParams({ useHigherTimeframeFilter: e.target.checked })} />启用高周期趋势过滤
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--color-text-secondary)", fontSize: "12px" }}>
+            <input type="checkbox" checked={requireHigherTimeframeSlope} onChange={(e) => setParams({ requireHigherTimeframeSlope: e.target.checked })} disabled={!useHigherTimeframeFilter} />高周期SMA需同向倾斜
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--color-text-secondary)", fontSize: "12px" }}>
+            <input type="checkbox" checked={conservativeSameBarExit} onChange={(e) => setParams({ conservativeSameBarExit: e.target.checked })} />同K线冲突优先止损
+          </label>
           <label style={{ display: "flex", alignItems: "center", gap: "8px", color: "var(--color-text-secondary)", fontSize: "12px" }}>
             <input type="checkbox" checked={useTrailingStop} onChange={(e) => setParams({ useTrailingStop: e.target.checked })} />启用ATR追踪止损
           </label>
@@ -439,6 +1606,46 @@ export default function BacktestView() {
 
       <PeriodComparison rows={periodRows} loading={periodComparing} onRun={() => void runPeriodComparison()} />
 
+      <DirectionStability rows={directionStabilityRows} loading={directionStabilityLoading} progress={directionStabilityProgress} onRun={() => void runDirectionStability()} />
+
+      <HigherTimeframeOptimization rows={higherTimeframeRows} loading={higherTimeframeOptimizing} progress={higherTimeframeProgress} currentRank={currentHigherTimeframeRank} onRun={() => void runHigherTimeframeOptimization()} onApply={applyHigherTimeframeBest} />
+
+      <HigherTimeframeWindowValidation rows={higherTimeframeWindowRows} loading={higherTimeframeWindowLoading} progress={higherTimeframeWindowProgress} onRun={() => void runHigherTimeframeWindowValidation()} />
+
+      <DefaultBenchmark benchmark={optimizationBenchmark} best={optimizationRows[0] ?? null} />
+
+      <ParameterOptimization rows={optimizationRows} loading={optimizing} progress={optimizationProgress} currentRank={currentOptimizationRank} activeStrategy={strategy} onRun={() => void runParameterOptimization()} />
+
+      <DualMaDirectionalOptimization
+        title="双均线只做多专项优化"
+        description="固定 ETH_USDT / 1h / 双均线 / 只做多，扫描快慢均线、ATR止损、ATR追踪和ATR止盈；用于验证 360 天样本里更有效的多头趋势路线。"
+        emptyText="点击“运行只做多优化”开始扫描。建议先确保 OKX 已补充至少 360 天 1h 数据。"
+        runButtonText="运行只做多优化"
+        rows={dualLongOptimizationRows}
+        benchmark={dualLongOptimizationBenchmark}
+        loading={dualLongOptimizing}
+        progress={dualLongOptimizationProgress}
+        currentRank={currentDualLongOptimizationRank}
+        direction="long_only"
+        onRun={() => void runDualMaLongOptimization()}
+        onApply={applyDualMaBest}
+      />
+
+      <DualMaDirectionalOptimization
+        title="双均线只做空专项优化"
+        description="固定 ETH_USDT / 1h / 双均线 / 只做空，扫描快慢均线、ATR止损、ATR追踪和ATR止盈；用于复核近期窗口中的空头趋势路线是否仍然稳定。"
+        emptyText="点击“运行只做空优化”开始扫描。建议先确保 OKX 已补充至少 180 天 1h 数据。"
+        runButtonText="运行只做空优化"
+        rows={dualOptimizationRows}
+        benchmark={dualOptimizationBenchmark}
+        loading={dualOptimizing}
+        progress={dualOptimizationProgress}
+        currentRank={currentDualOptimizationRank}
+        direction="short_only"
+        onRun={() => void runDualMaOptimization()}
+        onApply={applyDualMaBest}
+      />
+
       {validationMessage && (
         <div style={{ backgroundColor: loading ? "rgba(26,115,232,0.08)" : "rgba(0,255,136,0.08)", border: `1px solid ${loading ? "rgba(26,115,232,0.25)" : "rgba(0,255,136,0.25)"}`, borderRadius: "10px", padding: "14px", color: loading ? "var(--color-btn-primary)" : "var(--color-long)", fontSize: "13px", lineHeight: 1.6 }}>{validationMessage}</div>
       )}
@@ -454,6 +1661,8 @@ export default function BacktestView() {
       {result && (
         <>
           <StrategyDiagnosis result={result} idealResult={idealResult} interval={interval} />
+          <DirectionBreakdownTable breakdown={result.split.test.directionBreakdown} />
+          <WalkForwardTable rows={result.walkForward} />
           {idealResult && (
             <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", marginBottom: "12px" }}>

@@ -71,6 +71,8 @@ export const useMarketStore = create<MarketState>((set) => ({
 
 // === 策略状态 ===
 export type StrategyName = "composite" | "dual_ma" | "macd" | "sma_rsi_pullback";
+export type TradeDirection = "both" | "long_only" | "short_only";
+export type HigherTimeframe = "4h" | "1d";
 
 interface StrategyState {
   strategy: StrategyName;
@@ -87,11 +89,19 @@ interface StrategyState {
   atrPeriod: number;
   atrStopMultiplier: number;
   atrTrailMultiplier: number;
+  takeProfitAtrMultiplier: number;
   useTrailingStop: boolean;
   feeRate: number;
   slippageRate: number;
   cooldownBars: number;
   maxHoldBars: number;
+  tradeDirection: TradeDirection;
+  useHigherTimeframeFilter: boolean;
+  higherTimeframe: HigherTimeframe;
+  higherTimeframeSmaPeriod: number;
+  requireHigherTimeframeSlope: boolean;
+  signalDelayBars: number;
+  conservativeSameBarExit: boolean;
   signal: StrategySignal | null;
   signalHistory: StrategySignal[];
   setStrategy: (s: StrategyName) => void;
@@ -128,11 +138,19 @@ export const useStrategyStore = create<StrategyState>((set) => ({
   atrPeriod: 14,
   atrStopMultiplier: 1.8,
   atrTrailMultiplier: 3.5,
+  takeProfitAtrMultiplier: 0,
   useTrailingStop: true,
   feeRate: 0.0005,
   slippageRate: 0.0002,
   cooldownBars: 1,
   maxHoldBars: 0,
+  tradeDirection: "both",
+  useHigherTimeframeFilter: false,
+  higherTimeframe: "4h",
+  higherTimeframeSmaPeriod: 50,
+  requireHigherTimeframeSlope: true,
+  signalDelayBars: 0,
+  conservativeSameBarExit: false,
   signal: null,
   signalHistory: [],
   setStrategy: (s) => set({ strategy: s }),

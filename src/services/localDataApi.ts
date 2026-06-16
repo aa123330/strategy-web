@@ -33,9 +33,27 @@ export interface BacktestMetrics {
   maxConsecutiveLosses: number;
 }
 
+export type TradeDirection = "both" | "long_only" | "short_only";
+export type HigherTimeframe = "4h" | "1d";
+
+export interface DirectionBreakdown {
+  long: BacktestMetrics;
+  short: BacktestMetrics;
+}
+
 export interface BacktestSectionResult {
   metrics: BacktestMetrics;
   exitReasons?: Record<string, number>;
+  directionBreakdown?: DirectionBreakdown;
+}
+
+export interface WalkForwardRow {
+  label: string;
+  trainRatio: number;
+  testStartIndex: number;
+  testEndIndex: number;
+  result: BacktestSectionResult;
+  passed: boolean;
 }
 
 export interface BacktestResult {
@@ -48,6 +66,7 @@ export interface BacktestResult {
     train: BacktestSectionResult;
     test: BacktestSectionResult;
   };
+  walkForward?: WalkForwardRow[];
 }
 
 const LOCAL_API_BASE = "/local-api";
@@ -143,6 +162,8 @@ export async function runBacktest(params: {
   exchange?: string;
   symbol?: string;
   interval: string;
+  limit?: number;
+  trainRatio?: number;
   strategy?: "dual_ma" | "sma_rsi_pullback";
   fastPeriod: number;
   slowPeriod: number;
@@ -154,11 +175,19 @@ export async function runBacktest(params: {
   atrPeriod?: number;
   atrStopMultiplier?: number;
   atrTrailMultiplier?: number;
+  takeProfitAtrMultiplier?: number;
   useTrailingStop?: boolean;
   feeRate?: number;
   slippageRate?: number;
   cooldownBars?: number;
   maxHoldBars?: number;
+  tradeDirection?: TradeDirection;
+  useHigherTimeframeFilter?: boolean;
+  higherTimeframe?: HigherTimeframe;
+  higherTimeframeSmaPeriod?: number;
+  requireHigherTimeframeSlope?: boolean;
+  signalDelayBars?: number;
+  conservativeSameBarExit?: boolean;
 }): Promise<BacktestResult | null> {
   try {
     const resp = await fetch(`${LOCAL_API_BASE}/backtest`, {
@@ -168,6 +197,8 @@ export async function runBacktest(params: {
         exchange: params.exchange ?? "gate",
         symbol: params.symbol ?? "ETH_USDT",
         interval: params.interval,
+        limit: params.limit,
+        trainRatio: params.trainRatio,
         params: {
           strategy: params.strategy,
           fastPeriod: params.fastPeriod,
@@ -180,11 +211,19 @@ export async function runBacktest(params: {
           atrPeriod: params.atrPeriod,
           atrStopMultiplier: params.atrStopMultiplier,
           atrTrailMultiplier: params.atrTrailMultiplier,
+          takeProfitAtrMultiplier: params.takeProfitAtrMultiplier,
           useTrailingStop: params.useTrailingStop,
           feeRate: params.feeRate,
           slippageRate: params.slippageRate,
           cooldownBars: params.cooldownBars,
           maxHoldBars: params.maxHoldBars,
+          tradeDirection: params.tradeDirection,
+          useHigherTimeframeFilter: params.useHigherTimeframeFilter,
+          higherTimeframe: params.higherTimeframe,
+          higherTimeframeSmaPeriod: params.higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope: params.requireHigherTimeframeSlope,
+          signalDelayBars: params.signalDelayBars,
+          conservativeSameBarExit: params.conservativeSameBarExit,
         },
       }),
     });

@@ -24,6 +24,7 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
         slowPeriod?: number;
         stopLossPct?: number;
         takeProfitPct?: number;
+        takeProfitAtrMultiplier?: number;
         rsiPeriod?: number;
         longRsiMax?: number;
         shortRsiMin?: number;
@@ -37,6 +38,13 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
         slippageRate?: number;
         cooldownBars?: number;
         maxHoldBars?: number;
+        tradeDirection?: "both" | "long_only" | "short_only";
+        useHigherTimeframeFilter?: boolean;
+        higherTimeframe?: "4h" | "1d";
+        higherTimeframeSmaPeriod?: number;
+        requireHigherTimeframeSlope?: boolean;
+        signalDelayBars?: number;
+        conservativeSameBarExit?: boolean;
       };
     }> | undefined;
 

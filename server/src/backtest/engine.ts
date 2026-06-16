@@ -1,6 +1,8 @@
 import type { BacktestMetrics, BacktestTrade, Candle } from "../types";
 
 export type BacktestStrategyName = "dual_ma" | "sma_rsi_pullback";
+export type TradeDirection = "both" | "long_only" | "short_only";
+export type HigherTimeframe = "4h" | "1d";
 
 export interface BacktestParams {
   strategy: BacktestStrategyName;
@@ -9,6 +11,7 @@ export interface BacktestParams {
   entryThreshold: number;
   stopLossPct: number;
   takeProfitPct: number;
+  takeProfitAtrMultiplier: number;
   rsiPeriod: number;
   longRsiMax: number;
   shortRsiMin: number;
@@ -22,12 +25,34 @@ export interface BacktestParams {
   slippageRate: number;
   cooldownBars: number;
   maxHoldBars: number;
+  tradeDirection: TradeDirection;
+  useHigherTimeframeFilter: boolean;
+  higherTimeframe: HigherTimeframe;
+  higherTimeframeSmaPeriod: number;
+  requireHigherTimeframeSlope: boolean;
+  signalDelayBars: number;
+  conservativeSameBarExit: boolean;
+}
+
+export interface DirectionBreakdown {
+  long: BacktestMetrics;
+  short: BacktestMetrics;
 }
 
 export interface BacktestSectionResult {
   metrics: BacktestMetrics;
   trades: BacktestTrade[];
   exitReasons: Record<string, number>;
+  directionBreakdown: DirectionBreakdown;
+}
+
+export interface WalkForwardRow {
+  label: string;
+  trainRatio: number;
+  testStartIndex: number;
+  testEndIndex: number;
+  result: BacktestSectionResult;
+  passed: boolean;
 }
 
 export interface BacktestResult {
@@ -38,6 +63,7 @@ export interface BacktestResult {
     train: BacktestSectionResult;
     test: BacktestSectionResult;
   };
+  walkForward: WalkForwardRow[];
 }
 
 const DEFAULT_PARAMS: BacktestParams = {
@@ -47,6 +73,7 @@ const DEFAULT_PARAMS: BacktestParams = {
   entryThreshold: 0,
   stopLossPct: 0.012,
   takeProfitPct: 0.024,
+  takeProfitAtrMultiplier: 0,
   rsiPeriod: 14,
   longRsiMax: 42,
   shortRsiMin: 58,
@@ -60,6 +87,13 @@ const DEFAULT_PARAMS: BacktestParams = {
   slippageRate: 0.0002,
   cooldownBars: 1,
   maxHoldBars: 0,
+  tradeDirection: "both",
+  useHigherTimeframeFilter: false,
+  higherTimeframe: "4h",
+  higherTimeframeSmaPeriod: 50,
+  requireHigherTimeframeSlope: true,
+  signalDelayBars: 0,
+  conservativeSameBarExit: false,
 };
 
 function smaAt(candles: Candle[], index: number, period: number) {
@@ -147,6 +181,80 @@ function applyExitSlippage(price: number, side: "long" | "short", slippageRate: 
   return side === "long" ? price * (1 - slippageRate) : price * (1 + slippageRate);
 }
 
+function isDirectionAllowed(signal: "long" | "short", tradeDirection: TradeDirection) {
+  return tradeDirection === "both" || (tradeDirection === "long_only" && signal === "long") || (tradeDirection === "short_only" && signal === "short");
+}
+
+function higherTimeframeSeconds(timeframe: HigherTimeframe) {
+  return timeframe === "1d" ? 24 * 60 * 60 : 4 * 60 * 60;
+}
+
+type HigherTimeframeBias = "bull" | "bear" | "neutral";
+
+type HigherTimeframeBucket = Candle & { firstIndex: number; lastIndex: number };
+
+function buildHigherTimeframeBias(candles: Candle[], params: BacktestParams): HigherTimeframeBias[] {
+  const biases: HigherTimeframeBias[] = Array.from({ length: candles.length }, () => "neutral");
+  if (!params.useHigherTimeframeFilter) return biases;
+
+  const seconds = higherTimeframeSeconds(params.higherTimeframe);
+  const buckets: HigherTimeframeBucket[] = [];
+  const bucketIndexByTime = new Map<number, number>();
+  candles.forEach((candle, index) => {
+    const bucketTime = Math.floor(candle.time / seconds) * seconds;
+    const bucketIndex = bucketIndexByTime.get(bucketTime);
+    if (bucketIndex === undefined) {
+      bucketIndexByTime.set(bucketTime, buckets.length);
+      buckets.push({ ...candle, time: bucketTime, firstIndex: index, lastIndex: index });
+      return;
+    }
+    const existing = buckets[bucketIndex];
+    existing.high = Math.max(existing.high, candle.high);
+    existing.low = Math.min(existing.low, candle.low);
+    existing.close = candle.close;
+    existing.volume += candle.volume;
+    existing.turnover = (existing.turnover ?? 0) + (candle.turnover ?? 0);
+    existing.lastIndex = index;
+  });
+
+  const higherCandles: Candle[] = buckets.map((bucket) => ({
+    time: bucket.time,
+    open: bucket.open,
+    high: bucket.high,
+    low: bucket.low,
+    close: bucket.close,
+    volume: bucket.volume,
+    turnover: bucket.turnover,
+  }));
+  const period = Math.max(2, Math.floor(params.higherTimeframeSmaPeriod));
+  const biasForCompletedBucket = (bucketIndex: number): HigherTimeframeBias => {
+    const currentSma = smaAt(higherCandles, bucketIndex, period);
+    const prevSma = smaAt(higherCandles, bucketIndex - 1, period);
+    if (currentSma === null || prevSma === null) return "neutral";
+    const close = higherCandles[bucketIndex].close;
+    const slopeUp = currentSma > prevSma;
+    const slopeDown = currentSma < prevSma;
+    if (close > currentSma && (!params.requireHigherTimeframeSlope || slopeUp)) return "bull";
+    if (close < currentSma && (!params.requireHigherTimeframeSlope || slopeDown)) return "bear";
+    return "neutral";
+  };
+
+  for (let bucketIndex = 1; bucketIndex < buckets.length; bucketIndex += 1) {
+    const bias = biasForCompletedBucket(bucketIndex - 1);
+    for (let candleIndex = buckets[bucketIndex].firstIndex; candleIndex <= buckets[bucketIndex].lastIndex; candleIndex += 1) {
+      biases[candleIndex] = bias;
+    }
+  }
+  return biases;
+}
+
+function isAllowedByHigherTimeframe(signal: "long" | "short", bias: HigherTimeframeBias, params: BacktestParams) {
+  if (!params.useHigherTimeframeFilter) return true;
+  if (bias === "bull") return signal === "long";
+  if (bias === "bear") return signal === "short";
+  return false;
+}
+
 function getEntrySignal(candles: Candle[], index: number, params: BacktestParams): "long" | "short" | null {
   const prevFast = smaAt(candles, index - 1, params.fastPeriod);
   const prevSlow = smaAt(candles, index - 1, params.slowPeriod);
@@ -219,12 +327,21 @@ function metrics(candles: Candle[], trades: BacktestTrade[]): BacktestMetrics {
   };
 }
 
+function directionBreakdown(candles: Candle[], trades: BacktestTrade[]): DirectionBreakdown {
+  return {
+    long: metrics(candles, trades.filter((trade) => trade.side === "long")),
+    short: metrics(candles, trades.filter((trade) => trade.side === "short")),
+  };
+}
+
 export function runSectionBacktest(candles: Candle[], inputParams?: Partial<BacktestParams>): BacktestSectionResult {
   const params = { ...DEFAULT_PARAMS, ...inputParams };
   const trades: BacktestTrade[] = [];
   const exitReasons: Record<string, number> = {};
   let position: { side: "long" | "short"; entryTime: number; entryPrice: number; entryIndex: number; stopPrice: number | null } | null = null;
   let cooldownUntil = -1;
+  let pendingEntry: { signal: "long" | "short"; executeIndex: number } | null = null;
+  const higherTimeframeBiases = buildHigherTimeframeBias(candles, params);
 
   const warmup = Math.max(params.slowPeriod + 1, params.rsiPeriod + 1, params.atrPeriod + 1, params.adxPeriod * 2 + 1);
   for (let i = warmup; i < candles.length; i += 1) {
@@ -241,17 +358,46 @@ export function runSectionBacktest(candles: Candle[], inputParams?: Partial<Back
             : Math.min(position.stopPrice, candidateStop);
       }
 
-      const exitPriceWithSlippage = applyExitSlippage(candle.close, position.side, params.slippageRate);
-      const rawPnlPct = ((exitPriceWithSlippage - position.entryPrice) / position.entryPrice) * direction;
-      const pnlPct = rawPnlPct - tradingCost(params);
-      const crossedFixedStop = rawPnlPct <= -params.stopLossPct;
-      const crossedTakeProfit = rawPnlPct >= params.takeProfitPct;
-      const crossedTrailingStop = params.useTrailingStop && position.stopPrice !== null && (position.side === "long" ? candle.close <= position.stopPrice : candle.close >= position.stopPrice);
+      const closeExitPriceWithSlippage = applyExitSlippage(candle.close, position.side, params.slippageRate);
+      const closeRawPnlPct = ((closeExitPriceWithSlippage - position.entryPrice) / position.entryPrice) * direction;
+      const atrTakeProfitPct = atrValue === null || params.takeProfitAtrMultiplier <= 0 ? null : (atrValue * params.takeProfitAtrMultiplier) / position.entryPrice;
+      const takeProfitPct = atrTakeProfitPct ?? params.takeProfitPct;
+      const fixedStopPrice = position.entryPrice * (position.side === "long" ? 1 - params.stopLossPct : 1 + params.stopLossPct);
+      const takeProfitPrice = position.entryPrice * (position.side === "long" ? 1 + takeProfitPct : 1 - takeProfitPct);
+      const touchedFixedStop = position.side === "long" ? candle.low <= fixedStopPrice : candle.high >= fixedStopPrice;
+      const touchedTakeProfit = position.side === "long" ? candle.high >= takeProfitPrice : candle.low <= takeProfitPrice;
+      const touchedTrailingStop = params.useTrailingStop && position.stopPrice !== null && (position.side === "long" ? candle.low <= position.stopPrice : candle.high >= position.stopPrice);
+      const crossedFixedStop = params.conservativeSameBarExit ? touchedFixedStop : closeRawPnlPct <= -params.stopLossPct;
+      const crossedTakeProfit = params.conservativeSameBarExit ? touchedTakeProfit : closeRawPnlPct >= takeProfitPct;
+      const crossedTrailingStop = params.conservativeSameBarExit ? touchedTrailingStop : params.useTrailingStop && position.stopPrice !== null && (position.side === "long" ? candle.close <= position.stopPrice : candle.close >= position.stopPrice);
       const reversed = shouldReverseExit(candles, i, position.side, params);
       const timedOut = params.maxHoldBars > 0 && i - position.entryIndex >= params.maxHoldBars;
 
       if (crossedFixedStop || crossedTakeProfit || crossedTrailingStop || reversed || timedOut) {
-        const reason = crossedFixedStop ? "stop_loss" : crossedTakeProfit ? "take_profit" : crossedTrailingStop ? "trailing_stop" : reversed ? "reverse" : "time_exit";
+        const stopConflictsWithTakeProfit = params.conservativeSameBarExit && crossedTakeProfit && (crossedFixedStop || crossedTrailingStop);
+        const reason = stopConflictsWithTakeProfit
+          ? crossedFixedStop
+            ? "stop_loss"
+            : "trailing_stop"
+          : crossedFixedStop
+            ? "stop_loss"
+            : crossedTakeProfit
+              ? "take_profit"
+              : crossedTrailingStop
+                ? "trailing_stop"
+                : reversed
+                  ? "reverse"
+                  : "time_exit";
+        const rawExitPrice = reason === "stop_loss"
+          ? fixedStopPrice
+          : reason === "take_profit"
+            ? takeProfitPrice
+            : reason === "trailing_stop" && position.stopPrice !== null
+              ? position.stopPrice
+              : candle.close;
+        const exitPriceWithSlippage = applyExitSlippage(rawExitPrice, position.side, params.slippageRate);
+        const rawPnlPct = ((exitPriceWithSlippage - position.entryPrice) / position.entryPrice) * direction;
+        const pnlPct = rawPnlPct - tradingCost(params);
         exitReasons[reason] = (exitReasons[reason] ?? 0) + 1;
         trades.push({
           side: position.side,
@@ -267,25 +413,72 @@ export function runSectionBacktest(candles: Candle[], inputParams?: Partial<Back
       }
     }
 
-    if (!position && i >= cooldownUntil) {
+    if (!position && i >= cooldownUntil && pendingEntry && i >= pendingEntry.executeIndex) {
+      const signal = pendingEntry.signal;
+      pendingEntry = null;
+      const atrValue = atrAt(candles, i, params.atrPeriod);
+      const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
+      const direction = signal === "long" ? 1 : -1;
+      const atrStopDistance = atrValue === null ? entryPrice * params.stopLossPct : atrValue * params.atrStopMultiplier;
+      position = {
+        side: signal,
+        entryTime: candle.time,
+        entryPrice,
+        entryIndex: i,
+        stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
+      };
+    }
+
+    if (!position && i >= cooldownUntil && !pendingEntry) {
       const signal = getEntrySignal(candles, i, params);
-      if (signal) {
-        const atrValue = atrAt(candles, i, params.atrPeriod);
-        const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
-        const direction = signal === "long" ? 1 : -1;
-        const atrStopDistance = atrValue === null ? entryPrice * params.stopLossPct : atrValue * params.atrStopMultiplier;
-        position = {
-          side: signal,
-          entryTime: candle.time,
-          entryPrice,
-          entryIndex: i,
-          stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
-        };
+      if (signal && isDirectionAllowed(signal, params.tradeDirection) && isAllowedByHigherTimeframe(signal, higherTimeframeBiases[i], params)) {
+        const delay = Math.max(0, Math.floor(params.signalDelayBars));
+        if (delay > 0) {
+          pendingEntry = { signal, executeIndex: i + delay };
+        } else {
+          const atrValue = atrAt(candles, i, params.atrPeriod);
+          const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
+          const direction = signal === "long" ? 1 : -1;
+          const atrStopDistance = atrValue === null ? entryPrice * params.stopLossPct : atrValue * params.atrStopMultiplier;
+          position = {
+            side: signal,
+            entryTime: candle.time,
+            entryPrice,
+            entryIndex: i,
+            stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
+          };
+        }
       }
     }
   }
 
-  return { metrics: metrics(candles, trades), trades, exitReasons };
+  return { metrics: metrics(candles, trades), trades, exitReasons, directionBreakdown: directionBreakdown(candles, trades) };
+}
+
+function runWalkForward(candles: Candle[], strategyParams: BacktestParams): WalkForwardRow[] {
+  const windows = [
+    { label: "50%→10%", trainRatio: 0.5 },
+    { label: "60%→10%", trainRatio: 0.6 },
+    { label: "70%→10%", trainRatio: 0.7 },
+    { label: "80%→10%", trainRatio: 0.8 },
+  ];
+  const testSize = Math.max(120, Math.floor(candles.length * 0.1));
+
+  return windows.map((window) => {
+    const trainEnd = Math.floor(candles.length * window.trainRatio);
+    const testStart = Math.max(0, trainEnd - 80);
+    const testEnd = Math.min(candles.length, trainEnd + testSize);
+    const result = runSectionBacktest(candles.slice(testStart, testEnd), strategyParams);
+    const metrics = result.metrics;
+    return {
+      label: window.label,
+      trainRatio: window.trainRatio,
+      testStartIndex: testStart,
+      testEndIndex: testEnd,
+      result,
+      passed: metrics.trades >= 5 && metrics.profitFactor > 1 && metrics.totalReturn > 0 && metrics.maxDrawdown >= -0.1,
+    };
+  });
 }
 
 export function runSplitBacktest(params: {
@@ -310,5 +503,6 @@ export function runSplitBacktest(params: {
       train: runSectionBacktest(trainCandles, strategyParams),
       test: runSectionBacktest(testCandles, strategyParams),
     },
+    walkForward: runWalkForward(params.candles, strategyParams),
   };
 }
