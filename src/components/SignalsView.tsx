@@ -111,7 +111,7 @@ export default function SignalsView() {
       <div style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
           <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", display: "flex", alignItems: "center", gap: "6px" }}>
-            <Clock size={12} />最近开仓信号历史
+            <Clock size={12} />最近方向信号历史
           </div>
           <span style={{ fontSize: "11px", color: "var(--color-text-secondary)", fontFamily: "var(--font-mono)" }}>{candles.length} 根K线</span>
         </div>

@@ -73,5 +73,5 @@ export function generateDualMaSignal(
     return { action: "CLOSE_SHORT", price: last.close, reason: "双均线金叉平空", timestamp: last.time, symbol: "ETH_USDT" };
   }
 
-  return { action: "HOLD", price: last.close, reason: "持仓中未触发反向信号", timestamp: last.time, symbol: "ETH_USDT" };
+  return { action: "HOLD", price: last.close, reason: "已有方向未触发反向信号", timestamp: last.time, symbol: "ETH_USDT" };
 }

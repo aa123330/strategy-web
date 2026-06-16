@@ -27,6 +27,7 @@ export class BinanceWsClient {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private candles: CandleRow[] = [];
+  private manuallyClosed = false;
 
   constructor(
     interval: BinanceInterval,
@@ -39,17 +40,21 @@ export class BinanceWsClient {
   }
 
   async connect() {
+    this.manuallyClosed = false;
     this.onStatusChange("connecting");
     try {
       await this.fetchHistorical();
+      if (this.manuallyClosed) return;
       this.ws = new WebSocket(`wss://fstream.binance.com/ws/ethusdt@kline_${this.interval}`);
 
       this.ws.onopen = () => {
+        if (this.manuallyClosed) return;
         this.reconnectAttempts = 0;
         this.onStatusChange("connected");
       };
 
       this.ws.onmessage = (event) => {
+        if (this.manuallyClosed) return;
         try {
           const msg: BinanceKlineMessage = JSON.parse(event.data);
           if (msg.k && msg.k.i === this.interval) {
@@ -69,12 +74,16 @@ export class BinanceWsClient {
         }
       };
 
-      this.ws.onerror = () => this.onStatusChange("error");
+      this.ws.onerror = () => {
+        if (!this.manuallyClosed) this.onStatusChange("error");
+      };
       this.ws.onclose = () => {
+        if (this.manuallyClosed) return;
         this.onStatusChange("disconnected");
         this.scheduleReconnect();
       };
     } catch {
+      if (this.manuallyClosed) return;
       this.onStatusChange("error");
       this.scheduleReconnect();
     }
@@ -116,6 +125,7 @@ export class BinanceWsClient {
   }
 
   private scheduleReconnect() {
+    if (this.manuallyClosed) return;
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     if (this.reconnectAttempts > this.maxReconnectAttempts) return;
@@ -127,6 +137,7 @@ export class BinanceWsClient {
   }
 
   disconnect() {
+    this.manuallyClosed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     if (this.ws) {

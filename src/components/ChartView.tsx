@@ -14,12 +14,26 @@ const MA_SLOW_COLOR = "#ffaa00";
 const MACD_DIF_COLOR = "#00d4ff";
 const MACD_DEA_COLOR = "#ffaa00";
 
+const beijingTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+function formatBeijingTime(time: Time) {
+  if (typeof time !== "number") return String(time);
+  return beijingTimeFormatter.format(new Date(time * 1000));
+}
+
 function candleToLightweight(candles: { time: number; open: number; high: number; low: number; close: number }[]) {
   return candles.map((c) => ({ time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close }));
 }
 
 export default function ChartView() {
-  const { candles, interval, setInterval, loading, activeSource, preferredSource, connectionStatus, connectionError, setPreferredSource } = useMarketStore();
+  const { candles, interval, setInterval, loading, activeSource, preferredSource, connectionStatus, connectionError, lastUpdatedAt, setPreferredSource } = useMarketStore();
   const { strategy, fastPeriod, slowPeriod, macdFast, macdSlow, macdSignal, signal } = useStrategyStore();
 
   const sourceLabels: Record<DataSourceName, string> = {
@@ -27,7 +41,7 @@ export default function ChartView() {
     gate: "Gate",
     binance: "Binance",
     okx: "OKX",
-    fallback: "备用HTTP",
+    fallback: "HTTP兜底",
   };
 
   const mainRef = useRef<HTMLDivElement>(null);
@@ -95,8 +109,16 @@ export default function ChartView() {
       grid: { vertLines: { color: "#1e1e2e" }, horzLines: { color: "#1e1e2e" } },
       crosshair: { vertLine: { color: "#333344", labelBackgroundColor: "#111118" }, horzLine: { color: "#333344", labelBackgroundColor: "#111118" } },
       rightPriceScale: { borderColor: "#1e1e2e" },
-      timeScale: { borderColor: "#1e1e2e", timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: "#1e1e2e",
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: formatBeijingTime,
+      },
       handleScale: { axisPressedMouseMove: true },
+      localization: {
+        timeFormatter: formatBeijingTime,
+      },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -139,8 +161,16 @@ export default function ChartView() {
       grid: { vertLines: { color: "#1e1e2e" }, horzLines: { color: "#1e1e2e" } },
       crosshair: { mode: 0 },
       rightPriceScale: { borderColor: "#1e1e2e" },
-      timeScale: { borderColor: "#1e1e2e", timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: "#1e1e2e",
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: formatBeijingTime,
+      },
       height: 140,
+      localization: {
+        timeFormatter: formatBeijingTime,
+      },
     });
 
     const histSeries = chart.addSeries(HistogramSeries, { priceFormat: { type: "price", precision: 4, minMove: 0.0001 }, priceScaleId: "right" });
@@ -216,7 +246,7 @@ export default function ChartView() {
         {/* 策略标注 */}
         <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px", color: "var(--color-text-secondary)" }}>
           <TrendingUp size={12} />
-          <span style={{ fontFamily: "var(--font-mono)" }}>{strategy === "dual_ma" ? "双均线" : "MACD"}</span>
+          <span style={{ fontFamily: "var(--font-mono)" }}>{strategy === "composite" ? "综合评分" : strategy === "dual_ma" ? "双均线" : "MACD"}</span>
           <span style={{ color: MA_FAST_COLOR, fontFamily: "var(--font-mono)" }}>MA{fastPeriod}</span>
           <span style={{ color: MA_SLOW_COLOR, fontFamily: "var(--font-mono)" }}>MA{slowPeriod}</span>
         </div>
@@ -240,6 +270,7 @@ export default function ChartView() {
               }}
             >
               <option value="auto">自动切换</option>
+              <option value="fallback">HTTP兜底</option>
               <option value="gate">Gate</option>
               <option value="binance">Binance</option>
               <option value="okx">OKX</option>
@@ -261,8 +292,9 @@ export default function ChartView() {
           </div>
 
           <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--color-text-secondary)" }}>
-            <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
+            <RefreshCw size={11} className={loading || activeSource === "fallback" ? "animate-spin" : ""} />
             <span>{candles.length} 根K线</span>
+            {lastUpdatedAt && <span>更新 {new Date(lastUpdatedAt).toLocaleTimeString("zh-CN", { hour12: false })}</span>}
           </div>
         </div>
 

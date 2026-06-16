@@ -9,6 +9,26 @@ export interface CandleRow {
   turnover: string;
 }
 
+export interface Ticker {
+  contract: string;
+  last: string;
+  change_percentage: string;
+  total_size: string;
+  volume_24h: string;
+  volume_24h_btc: string;
+  volume_24h_usd: string;
+  volume_24h_quote: string;
+  mark_price: string;
+  index_price: string;
+  funding_rate: string;
+  funding_rate_indicative: string;
+  funding_rate_next?: string;
+  highest_bid: string;
+  lowest_ask: string;
+  high_24h: string;
+  low_24h: string;
+}
+
 export interface Contract {
   name: string;
   type: string;
@@ -41,8 +61,18 @@ export interface Contract {
   quanto_multiplier: string;
 }
 
+const GATE_API_BASE = "/gate-api/api/v4/futures/usdt";
+
 export async function getContract(contract = "ETH_USDT"): Promise<Contract | null> {
-  const resp = await fetch(`https://api.gateio.ws/api/v4/futures/usdt/contracts/${contract}`);
+  const resp = await fetch(`${GATE_API_BASE}/contracts/${contract}`);
   if (!resp.ok) return null;
   return (await resp.json()) as Contract;
+}
+
+export async function getTicker(contract = "ETH_USDT"): Promise<Ticker | null> {
+  const resp = await fetch(`${GATE_API_BASE}/tickers?contract=${contract}&_t=${Date.now()}`);
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (!Array.isArray(data) || !data.length) return null;
+  return data[0] as Ticker;
 }

@@ -5,4 +5,13 @@ import tailwindcss from '@tailwindcss/vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  server: {
+    proxy: {
+      '/gate-api': {
+        target: 'https://api.gateio.ws',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/gate-api/, ''),
+      },
+    },
+  },
 })

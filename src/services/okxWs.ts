@@ -26,6 +26,7 @@ export class OkxWsClient {
   private maxReconnectAttempts = 10;
   private candles: CandleRow[] = [];
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private manuallyClosed = false;
 
   constructor(
     interval: OkxInterval,
@@ -38,12 +39,15 @@ export class OkxWsClient {
   }
 
   async connect() {
+    this.manuallyClosed = false;
     this.onStatusChange("connecting");
     try {
       await this.fetchHistorical();
+      if (this.manuallyClosed) return;
       this.ws = new WebSocket("wss://ws.okx.com:8443/ws/v5/public");
 
       this.ws.onopen = () => {
+        if (this.manuallyClosed) return;
         this.reconnectAttempts = 0;
         this.onStatusChange("connected");
         const channel = toOkxChannel(this.interval);
@@ -53,6 +57,7 @@ export class OkxWsClient {
       };
 
       this.ws.onmessage = (event) => {
+        if (this.manuallyClosed) return;
         try {
           if (typeof event.data === "string" && event.data === "pong") return;
           const msg = JSON.parse(event.data);
@@ -77,8 +82,11 @@ export class OkxWsClient {
         }
       };
 
-      this.ws.onerror = () => this.onStatusChange("error");
+      this.ws.onerror = () => {
+        if (!this.manuallyClosed) this.onStatusChange("error");
+      };
       this.ws.onclose = () => {
+        if (this.manuallyClosed) return;
         this.onStatusChange("disconnected");
         this.scheduleReconnect();
       };
@@ -89,6 +97,7 @@ export class OkxWsClient {
         }
       }, 20000);
     } catch {
+      if (this.manuallyClosed) return;
       this.onStatusChange("error");
       this.scheduleReconnect();
     }
@@ -97,7 +106,7 @@ export class OkxWsClient {
   private async fetchHistorical() {
     const channel = toOkxChannel(this.interval);
     const resp = await fetch(
-      `https://www.okx.com/api/v5/market/${channel}?instId=ETH-USDT-SWAP&bar=${this.interval}&limit=300`
+      `https://www.okx.com/api/v5/market/candles?instId=ETH-USDT-SWAP&bar=${channel}&limit=300`
     );
     if (!resp.ok) throw new Error("OKX HTTP " + resp.status);
     const json = await resp.json();
@@ -138,6 +147,7 @@ export class OkxWsClient {
   }
 
   private scheduleReconnect() {
+    if (this.manuallyClosed) return;
     if (this.reconnectTimer) return;
     this.reconnectAttempts += 1;
     if (this.reconnectAttempts > this.maxReconnectAttempts) return;
@@ -149,6 +159,7 @@ export class OkxWsClient {
   }
 
   disconnect() {
+    this.manuallyClosed = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     if (this.pingTimer) clearInterval(this.pingTimer);

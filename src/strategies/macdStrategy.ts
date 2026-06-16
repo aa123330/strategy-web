@@ -43,5 +43,5 @@ export function generateMacdSignal(
     return { action: "CLOSE_SHORT", price: last.close, reason: "MACD金叉平空", timestamp: last.time, symbol: "ETH_USDT" };
   }
 
-  return { action: "HOLD", price: last.close, reason: "持仓中未触发MACD反向信号", timestamp: last.time, symbol: "ETH_USDT" };
+  return { action: "HOLD", price: last.close, reason: "已有方向未触发MACD反向信号", timestamp: last.time, symbol: "ETH_USDT" };
 }
