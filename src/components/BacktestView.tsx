@@ -128,6 +128,15 @@ interface HigherTimeframeWindowRow {
   error?: string;
 }
 
+interface ConservativeValidationRow {
+  mode: "normal" | "conservative";
+  label: string;
+  signalDelayBars: number;
+  conservativeSameBarExit: boolean;
+  result: BacktestResult | null;
+  error?: string;
+}
+
 function resultDiagnosis(metrics: BacktestMetrics | undefined | null) {
   if (!metrics) return "无数据";
   if (metrics.trades < 8) return "交易太少";
@@ -306,6 +315,46 @@ interface HigherTimeframeOptimizationRow {
   tags: string[];
   robust: boolean;
   error?: string;
+}
+
+interface LockedHigherTimeframeCandidate {
+  exchange: string;
+  strategy: "dual_ma";
+  interval: "1h";
+  tradeDirection: "both";
+  fastPeriod: number;
+  slowPeriod: number;
+  rsiPeriod: number;
+  longRsiMax: number;
+  shortRsiMin: number;
+  adxPeriod: number;
+  minAdx: number;
+  atrPeriod: number;
+  atrStopMultiplier: number;
+  atrTrailMultiplier: number;
+  takeProfitAtrMultiplier: number;
+  useTrailingStop: boolean;
+  feeRate: number;
+  slippageRate: number;
+  cooldownBars: number;
+  maxHoldBars: number;
+  signalDelayBars: number;
+  conservativeSameBarExit: boolean;
+  useHigherTimeframeFilter: true;
+  higherTimeframe: HigherTimeframe;
+  higherTimeframeSmaPeriod: number;
+  requireHigherTimeframeSlope: boolean;
+  source?: {
+    totalReturn: number;
+    profitFactor: number;
+    maxDrawdown: number;
+    trades: number;
+  };
+}
+
+function lockedCandidateLabel(candidate: LockedHigherTimeframeCandidate | null) {
+  if (!candidate) return null;
+  return `双均线 / ${candidate.interval} / 双向 / 快${candidate.fastPeriod} 慢${candidate.slowPeriod} / ${candidate.higherTimeframe} SMA${candidate.higherTimeframeSmaPeriod} / ${candidate.requireHigherTimeframeSlope ? "斜率确认" : "仅位置"}`;
 }
 
 function scoreOptimization(real: BacktestResult | null) {
@@ -517,25 +566,101 @@ function ParameterOptimization({ rows, loading, progress, currentRank, activeStr
   );
 }
 
-function HigherTimeframeWindowValidation({ rows, loading, progress, onRun }: { rows: HigherTimeframeWindowRow[]; loading: boolean; progress: string | null; onRun: () => void }) {
+function ConservativeValidation({ rows, loading, progress, lockedCandidate, onRun }: { rows: ConservativeValidationRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
+  const normal = rows.find((row) => row.mode === "normal")?.result?.split.test.metrics;
+  const conservative = rows.find((row) => row.mode === "conservative")?.result?.split.test.metrics;
+  const passed = !!conservative && conservative.totalReturn > 0.05 && conservative.profitFactor > 1.2 && conservative.maxDrawdown > -0.08 && conservative.trades >= 10;
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>当前主候选保守回测验证</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>固定“已锁定候选”参数，对比普通模式与信号延迟 1 根 K 线、同 K 线冲突优先止损的保守模式，避免与当前页面参数混用。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "验证中..." : "运行保守回测对照"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先在“高周期过滤参数优化”中点击“一键应用当前第一名并锁定”。</div>}
+      {normal && conservative && <div style={{ marginBottom: "10px", color: passed ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{passed ? "保守模式通过：收益、PF、回撤和交易数仍满足当前研究阈值。" : "保守模式未完全通过：需重点检查收益、PF、回撤或交易数是否被执行假设削弱。"}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead>
+            <tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>模式</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>信号延迟</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>同K线冲突</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>最大回撤</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>多空拆分</th>
+              <th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={10} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行保守回测对照”开始验证当前主候选。</td></tr>}
+            {rows.map((row) => {
+              const metrics = row.result?.split.test.metrics;
+              const breakdown = row.result?.split.test.directionBreakdown;
+              const diagnosis = row.error
+                ? row.error
+                : !metrics
+                  ? "无数据"
+                  : row.mode === "conservative" && metrics.totalReturn > 0.05 && metrics.profitFactor > 1.2 && metrics.maxDrawdown > -0.08 && metrics.trades >= 10
+                    ? "保守通过"
+                    : metrics.totalReturn > 0 && metrics.profitFactor > 1
+                      ? "正期望"
+                      : "未通过";
+              return (
+                <tr key={row.mode}>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.label}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.signalDelayBars}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.conservativeSameBarExit ? "优先止损" : "普通"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.winRate) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? String(metrics.trades) : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{breakdown ? `多 ${pct(breakdown.long.totalReturn)} / 空 ${pct(breakdown.short.totalReturn)}` : "--"}</td>
+                  <td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: diagnosis.includes("通过") || diagnosis.includes("正期望") ? "var(--color-long)" : "#ffaa00" }}>{diagnosis}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function HigherTimeframeWindowValidation({ rows, loading, progress, lockedCandidate, onRun }: { rows: HigherTimeframeWindowRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
   const improved = rows.filter((row) => {
     const baseline = row.baseline?.split.test.metrics;
     const filtered = row.filtered?.split.test.metrics;
     return baseline && filtered && filtered.totalReturn > baseline.totalReturn && filtered.profitFactor >= baseline.profitFactor;
   }).length;
   const summary = rows.length ? `高周期过滤在 ${improved} / ${rows.length} 个窗口中同时改善收益与 PF。` : "";
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
 
   return (
     <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
         <div>
           <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>高周期过滤分窗稳定性验证</div>
-          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>用当前高周期过滤参数，对比最近 90 / 180 / 270 / 360 天的默认双向与过滤后表现，验证候选过滤器是否跨窗口稳定。</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>用“已锁定候选”参数，对比最近 90 / 180 / 270 / 360 天的默认双向与过滤后表现，验证候选过滤器是否跨窗口稳定。</div>
         </div>
         <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
           {loading ? "验证中..." : "运行高周期分窗验证"}
         </button>
       </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先在“高周期过滤参数优化”中点击“一键应用当前第一名并锁定”。</div>}
       {summary && <div style={{ marginBottom: "10px", color: improved >= Math.ceil(rows.length / 2) ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{summary}</div>}
       {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
       <div style={{ overflowX: "auto" }}>
@@ -607,7 +732,7 @@ function HigherTimeframeOptimization({ rows, loading, progress, currentRank, onR
       {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
       {currentRank !== null && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>当前页面高周期过滤参数在本轮候选中的排名：#{currentRank}。</div>}
       {bestMetrics && <div style={{ marginBottom: "10px", color: best?.robust ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>当前排名第一：{best.higherTimeframe} / SMA{best.smaPeriod} / {best.requireSlope ? "要求斜率" : "不要求斜率"}；真实收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，{best.tags.join(" / ")}</div>}
-      {best && <button onClick={() => onApply(best)} style={{ marginBottom: "10px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "rgba(26,115,232,0.14)", color: "var(--color-btn-primary)", cursor: "pointer" }}>一键应用当前第一名并重新验证</button>}
+      {best && <button onClick={() => onApply(best)} style={{ marginBottom: "10px", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "rgba(26,115,232,0.14)", color: "var(--color-btn-primary)", cursor: "pointer" }}>一键应用当前第一名并锁定</button>}
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
           <thead>
@@ -792,6 +917,10 @@ export default function BacktestView() {
   const [higherTimeframeWindowLoading, setHigherTimeframeWindowLoading] = useState(false);
   const [higherTimeframeWindowRows, setHigherTimeframeWindowRows] = useState<HigherTimeframeWindowRow[]>([]);
   const [higherTimeframeWindowProgress, setHigherTimeframeWindowProgress] = useState<string | null>(null);
+  const [lockedHigherTimeframeCandidate, setLockedHigherTimeframeCandidate] = useState<LockedHigherTimeframeCandidate | null>(null);
+  const [conservativeValidationLoading, setConservativeValidationLoading] = useState(false);
+  const [conservativeValidationRows, setConservativeValidationRows] = useState<ConservativeValidationRow[]>([]);
+  const [conservativeValidationProgress, setConservativeValidationProgress] = useState<string | null>(null);
   const [optimizing, setOptimizing] = useState(false);
   const [optimizationRows, setOptimizationRows] = useState<OptimizationRow[]>([]);
   const [optimizationBenchmark, setOptimizationBenchmark] = useState<BacktestResult | null>(null);
@@ -968,56 +1097,114 @@ export default function BacktestView() {
     setDirectionStabilityLoading(false);
   };
 
+  const runConservativeValidation = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setConservativeValidationRows([]);
+      setConservativeValidationProgress("请先在高周期过滤参数优化中锁定一个候选，再运行保守回测对照。");
+      return;
+    }
+    setConservativeValidationLoading(true);
+    setConservativeValidationRows([]);
+    setConservativeValidationProgress("准备对比锁定候选的普通模式与保守模式...");
+    const commonParams = {
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+    };
+    const configs: Array<Omit<ConservativeValidationRow, "result" | "error">> = [
+      { mode: "normal", label: "普通", signalDelayBars: 0, conservativeSameBarExit: false },
+      { mode: "conservative", label: "保守", signalDelayBars: 1, conservativeSameBarExit: true },
+    ];
+    const rows = await Promise.all(configs.map(async (config) => {
+      const result = await runBacktest({
+        ...commonParams,
+        signalDelayBars: config.signalDelayBars,
+        conservativeSameBarExit: config.conservativeSameBarExit,
+      });
+      return { ...config, result, error: result ? undefined : "样本不足" };
+    }));
+    setConservativeValidationRows(rows);
+    setConservativeValidationProgress("保守回测对照完成：已使用锁定候选验证普通模式与保守模式。");
+    setConservativeValidationLoading(false);
+  };
+
   const runHigherTimeframeWindowValidation = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setHigherTimeframeWindowRows([]);
+      setHigherTimeframeWindowProgress("请先在高周期过滤参数优化中锁定一个候选，再运行分窗稳定性验证。");
+      return;
+    }
     setHigherTimeframeWindowLoading(true);
     setHigherTimeframeWindowRows([]);
-    setHigherTimeframeWindowProgress("准备验证 4 个分窗...");
+    setHigherTimeframeWindowProgress("准备使用锁定候选验证 4 个分窗...");
     const windows = [90, 180, 270, 360];
     const rows: HigherTimeframeWindowRow[] = [];
     for (let index = 0; index < windows.length; index += 1) {
       const windowDays = windows[index];
       setHigherTimeframeWindowProgress(`正在验证 ${index + 1} / ${windows.length} 个窗口：最近 ${windowDays} 天...`);
       const commonBase = {
-        exchange: historicalSource,
+        exchange: lockedHigherTimeframeCandidate.exchange,
         symbol: "ETH_USDT",
-        interval: "1h",
+        interval: lockedHigherTimeframeCandidate.interval,
         limit: windowDays * 24,
         trainRatio: 0.01,
-        strategy: "dual_ma" as const,
-        fastPeriod,
-        slowPeriod,
-        rsiPeriod,
-        longRsiMax,
-        shortRsiMin,
-        adxPeriod,
-        minAdx,
-        atrPeriod,
-        atrStopMultiplier,
-        atrTrailMultiplier,
-        takeProfitAtrMultiplier,
-        useTrailingStop,
-        feeRate,
-        slippageRate,
-        cooldownBars,
-        maxHoldBars,
-        signalDelayBars,
-        conservativeSameBarExit,
+        strategy: lockedHigherTimeframeCandidate.strategy,
+        fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+        slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+        rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+        longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+        shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+        adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+        minAdx: lockedHigherTimeframeCandidate.minAdx,
+        atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+        atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+        atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+        takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+        useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+        feeRate: lockedHigherTimeframeCandidate.feeRate,
+        slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+        cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+        maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+        signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+        conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
       };
       const [baseline, filtered] = await Promise.all([
         runBacktest({ ...commonBase, tradeDirection: "both", useHigherTimeframeFilter: false }),
         runBacktest({
           ...commonBase,
-          tradeDirection: "both",
-          useHigherTimeframeFilter: true,
-          higherTimeframe,
-          higherTimeframeSmaPeriod,
-          requireHigherTimeframeSlope,
+          tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+          useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+          higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+          higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+          requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
         }),
       ]);
       rows.push({ windowDays, baseline, filtered, error: baseline && filtered ? undefined : "样本不足" });
       setHigherTimeframeWindowRows([...rows]);
     }
-    setHigherTimeframeWindowProgress(`高周期过滤分窗验证完成：已验证 ${windows.length} 个窗口。`);
+    setHigherTimeframeWindowProgress(`高周期过滤分窗验证完成：已使用锁定候选验证 ${windows.length} 个窗口。`);
     setHigherTimeframeWindowLoading(false);
   };
 
@@ -1104,6 +1291,42 @@ export default function BacktestView() {
   };
 
   const applyHigherTimeframeBest = (row: HigherTimeframeOptimizationRow) => {
+    const metrics = row.real?.split.test.metrics;
+    const candidate: LockedHigherTimeframeCandidate = {
+      exchange: historicalSource,
+      strategy: "dual_ma",
+      interval: "1h",
+      tradeDirection: "both",
+      fastPeriod,
+      slowPeriod,
+      rsiPeriod,
+      longRsiMax,
+      shortRsiMin,
+      adxPeriod,
+      minAdx,
+      atrPeriod,
+      atrStopMultiplier,
+      atrTrailMultiplier,
+      takeProfitAtrMultiplier,
+      useTrailingStop,
+      feeRate,
+      slippageRate,
+      cooldownBars,
+      maxHoldBars,
+      signalDelayBars,
+      conservativeSameBarExit,
+      useHigherTimeframeFilter: true,
+      higherTimeframe: row.higherTimeframe,
+      higherTimeframeSmaPeriod: row.smaPeriod,
+      requireHigherTimeframeSlope: row.requireSlope,
+      source: metrics ? {
+        totalReturn: metrics.totalReturn,
+        profitFactor: metrics.profitFactor,
+        maxDrawdown: metrics.maxDrawdown,
+        trades: metrics.trades,
+      } : undefined,
+    };
+    setLockedHigherTimeframeCandidate(candidate);
     setMarketInterval("1h");
     setStrategy("dual_ma");
     setParams({
@@ -1113,7 +1336,11 @@ export default function BacktestView() {
       higherTimeframeSmaPeriod: row.smaPeriod,
       requireHigherTimeframeSlope: row.requireSlope,
     });
-    setValidationMessage(`已应用高周期过滤第一名：${row.higherTimeframe} / SMA${row.smaPeriod} / ${row.requireSlope ? "斜率确认" : "仅位置"}，正在重新验证主回测...`);
+    setHigherTimeframeWindowRows([]);
+    setConservativeValidationRows([]);
+    setHigherTimeframeWindowProgress("已锁定候选。请重新运行高周期分窗验证，结果将强制使用这组参数。");
+    setConservativeValidationProgress("已锁定候选。请重新运行保守回测对照，结果将强制使用这组参数。");
+    setValidationMessage(`已应用并锁定高周期过滤第一名：${row.higherTimeframe} / SMA${row.smaPeriod} / ${row.requireSlope ? "斜率确认" : "仅位置"}，后续分窗和保守验证将使用同一口径。`);
   };
 
   const runParameterOptimization = async () => {
@@ -1610,7 +1837,9 @@ export default function BacktestView() {
 
       <HigherTimeframeOptimization rows={higherTimeframeRows} loading={higherTimeframeOptimizing} progress={higherTimeframeProgress} currentRank={currentHigherTimeframeRank} onRun={() => void runHigherTimeframeOptimization()} onApply={applyHigherTimeframeBest} />
 
-      <HigherTimeframeWindowValidation rows={higherTimeframeWindowRows} loading={higherTimeframeWindowLoading} progress={higherTimeframeWindowProgress} onRun={() => void runHigherTimeframeWindowValidation()} />
+      <HigherTimeframeWindowValidation rows={higherTimeframeWindowRows} loading={higherTimeframeWindowLoading} progress={higherTimeframeWindowProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runHigherTimeframeWindowValidation()} />
+
+      <ConservativeValidation rows={conservativeValidationRows} loading={conservativeValidationLoading} progress={conservativeValidationProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runConservativeValidation()} />
 
       <DefaultBenchmark benchmark={optimizationBenchmark} best={optimizationRows[0] ?? null} />
 
