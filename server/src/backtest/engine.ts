@@ -104,6 +104,28 @@ export interface BacktestResult {
   walkForward: WalkForwardRow[];
 }
 
+export interface RealtimeSignalEvaluation {
+  latestCandle: Candle | null;
+  rawSignal: "long" | "short" | null;
+  finalAction: "open_long" | "open_short" | "hold";
+  finalSignal: "long" | "short" | null;
+  higherTimeframeBias: HigherTimeframeBias;
+  marketBreadthBias: MarketBreadthBias;
+  checks: {
+    direction: boolean;
+    higherTimeframe: boolean;
+    marketBreadth: boolean;
+    trendQuality: boolean;
+  };
+  indicators: {
+    fastSma: number | null;
+    slowSma: number | null;
+    atr: number | null;
+  };
+  reasons: string[];
+  marketBreadthDiagnostics?: MarketBreadthDiagnostics;
+}
+
 const DEFAULT_PARAMS: BacktestParams = {
   strategy: "dual_ma",
   fastPeriod: 20,
@@ -279,8 +301,8 @@ function higherTimeframeSeconds(timeframe: HigherTimeframe) {
   return timeframe === "1d" ? 24 * 60 * 60 : 4 * 60 * 60;
 }
 
-type HigherTimeframeBias = "bull" | "bear" | "neutral";
-type MarketBreadthBias = HigherTimeframeBias;
+export type HigherTimeframeBias = "bull" | "bear" | "neutral";
+export type MarketBreadthBias = HigherTimeframeBias;
 
 type HigherTimeframeBucket = Candle & { firstIndex: number; lastIndex: number };
 
@@ -570,6 +592,71 @@ function directionBreakdown(candles: Candle[], trades: BacktestTrade[]): Directi
   return {
     long: metrics(candles, trades.filter((trade) => trade.side === "long")),
     short: metrics(candles, trades.filter((trade) => trade.side === "short")),
+  };
+}
+
+export function evaluateLatestSignal(candles: Candle[], inputParams?: Partial<BacktestParams>, breadthCandlesBySymbol?: Record<string, Candle[]>): RealtimeSignalEvaluation {
+  const params = { ...DEFAULT_PARAMS, ...inputParams };
+  const latestIndex = candles.length - 1;
+  const latestCandle = candles[latestIndex] ?? null;
+  const emptyResult: RealtimeSignalEvaluation = {
+    latestCandle,
+    rawSignal: null,
+    finalAction: "hold",
+    finalSignal: null,
+    higherTimeframeBias: "neutral",
+    marketBreadthBias: "neutral",
+    checks: { direction: false, higherTimeframe: false, marketBreadth: false, trendQuality: false },
+    indicators: { fastSma: null, slowSma: null, atr: null },
+    reasons: ["历史K线不足，暂不生成信号。"],
+  };
+  if (latestIndex < 0) return emptyResult;
+
+  const warmup = Math.max(params.slowPeriod + 1, params.rsiPeriod + 1, params.atrPeriod + 1, params.adxPeriod * 2 + 1);
+  const higherTimeframeBiases = buildHigherTimeframeBias(candles, params);
+  const marketBreadth = buildMarketBreadthBias(candles, params, breadthCandlesBySymbol);
+  const marketBreadthBiases = marketBreadth.biases;
+  const rawSignal = latestIndex >= warmup ? getEntrySignal(candles, latestIndex, params) : null;
+  const higherTimeframeBias = higherTimeframeBiases[latestIndex] ?? "neutral";
+  const marketBreadthBias = marketBreadthBiases[latestIndex] ?? "neutral";
+  const directionAllowed = rawSignal ? isDirectionAllowed(rawSignal, params.tradeDirection) : false;
+  const higherTimeframeAllowed = rawSignal ? isAllowedByHigherTimeframe(rawSignal, higherTimeframeBias, params) : false;
+  const marketBreadthAllowed = rawSignal ? isAllowedByMarketBreadth(rawSignal, marketBreadthBias, params) : false;
+  const trendQualityAllowed = rawSignal ? isAllowedByTrendQuality(candles, latestIndex, params) : false;
+  const finalSignal = rawSignal && directionAllowed && higherTimeframeAllowed && marketBreadthAllowed && trendQualityAllowed ? rawSignal : null;
+  const reasons: string[] = [];
+
+  if (latestIndex < warmup) reasons.push(`指标预热不足：当前 ${candles.length} 根K线，至少需要 ${warmup + 1} 根。`);
+  if (!rawSignal && latestIndex >= warmup) reasons.push("当前K线未触发双均线交叉入场信号。");
+  if (rawSignal) {
+    reasons.push(`主策略原始信号：${rawSignal === "long" ? "做多" : "做空"}。`);
+    if (!directionAllowed) reasons.push("原始信号不符合当前多空方向限制。");
+    if (!higherTimeframeAllowed) reasons.push(`高周期过滤未放行：当前状态为 ${higherTimeframeBias}。`);
+    if (!marketBreadthAllowed) reasons.push(`市场广度过滤未放行：当前状态为 ${marketBreadthBias}。`);
+    if (!trendQualityAllowed) reasons.push("趋势质量过滤未放行：慢均线距离或ATR波动条件不足。");
+    if (finalSignal) reasons.push("主策略、高周期趋势、市场广度和趋势质量均已放行。仅作为研究信号，不代表交易建议。");
+  }
+
+  return {
+    latestCandle,
+    rawSignal,
+    finalAction: finalSignal === "long" ? "open_long" : finalSignal === "short" ? "open_short" : "hold",
+    finalSignal,
+    higherTimeframeBias,
+    marketBreadthBias,
+    checks: {
+      direction: directionAllowed,
+      higherTimeframe: higherTimeframeAllowed,
+      marketBreadth: marketBreadthAllowed,
+      trendQuality: trendQualityAllowed,
+    },
+    indicators: {
+      fastSma: smaAt(candles, latestIndex, params.fastPeriod),
+      slowSma: smaAt(candles, latestIndex, params.slowPeriod),
+      atr: atrAt(candles, latestIndex, params.atrPeriod),
+    },
+    reasons,
+    marketBreadthDiagnostics: marketBreadth.diagnostics,
   };
 }
 

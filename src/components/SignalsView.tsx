@@ -1,6 +1,8 @@
+import { useEffect, useState } from "react";
 import { useMarketStore, useStrategyStore } from "../store";
+import { getRealtimeSignal, type RealtimeSignalResult } from "../services/localDataApi";
 import { formatTimestamp } from "../utils/formatters";
-import { TrendingUp, TrendingDown, Minus, Clock, Shield, Target, AlertTriangle, Gauge } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, Clock, Shield, Target, AlertTriangle, Gauge, RefreshCw } from "lucide-react";
 
 const ACTION_CONFIG = {
   OPEN_LONG: { label: "建议做多", color: "var(--color-long)", bg: "rgba(0,255,136,0.08)", icon: TrendingUp },
@@ -14,6 +16,94 @@ type CurrentSignal = NonNullable<ReturnType<typeof useStrategyStore.getState>["s
 
 function fmtPrice(value?: number) {
   return typeof value === "number" ? `$${value.toFixed(2)}` : "--";
+}
+
+function pct(value?: number | null, decimals = 2) {
+  return typeof value === "number" ? `${(value * 100).toFixed(decimals)}%` : "--";
+}
+
+function fmtIndicator(value?: number | null, decimals = 2) {
+  return typeof value === "number" ? value.toFixed(decimals) : "--";
+}
+
+function biasLabel(value: "bull" | "bear" | "neutral") {
+  if (value === "bull") return "多头";
+  if (value === "bear") return "空头";
+  return "中性";
+}
+
+function biasColor(value: "bull" | "bear" | "neutral") {
+  if (value === "bull") return "var(--color-long)";
+  if (value === "bear") return "var(--color-short)";
+  return "var(--color-hold)";
+}
+
+function actionLabel(action: RealtimeSignalResult["evaluation"]["finalAction"]) {
+  if (action === "open_long") return "允许做多";
+  if (action === "open_short") return "允许做空";
+  return "空仓观望";
+}
+
+function LockedStrategySignalCard({ data, loading, onRefresh }: { data: RealtimeSignalResult | null; loading: boolean; onRefresh: () => void }) {
+  const action = data?.evaluation.finalAction ?? "hold";
+  const actionColor = action === "open_long" ? "var(--color-long)" : action === "open_short" ? "var(--color-short)" : "var(--color-hold)";
+  const latestCandle = data?.evaluation.latestCandle;
+  const diagnostics = data?.evaluation.marketBreadthDiagnostics;
+
+  return (
+    <div style={{ backgroundColor: "var(--color-bg-card)", border: `1px solid ${actionColor}44`, borderRadius: "12px", padding: "18px", display: "flex", flexDirection: "column", gap: "14px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px", flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginBottom: "6px" }}>锁定策略 V1 实时状态</div>
+          <div style={{ fontSize: "24px", fontWeight: 700, color: actionColor }}>{data ? actionLabel(action) : loading ? "读取中..." : "暂无数据"}</div>
+          <div style={{ marginTop: "6px", fontSize: "12px", color: "var(--color-text-secondary)" }}>{data?.config.name ?? "主策略增强版 V1"}</div>
+        </div>
+        <button onClick={onRefresh} disabled={loading} style={{ display: "flex", alignItems: "center", gap: "6px", padding: "8px 12px", borderRadius: "8px", border: "1px solid var(--color-border)", background: "transparent", color: "var(--color-text-primary)", cursor: loading ? "not-allowed" : "pointer", opacity: loading ? 0.6 : 1 }}>
+          <RefreshCw size={14} />刷新
+        </button>
+      </div>
+
+      {data ? (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, minmax(120px, 1fr))", gap: "10px" }}>
+            <DataItem label="标的/周期" value={`${data.config.exchange.toUpperCase()} ${data.config.symbol} ${data.config.interval}`} />
+            <DataItem label="当前价格" value={fmtPrice(latestCandle?.close)} color={actionColor} />
+            <DataItem label="最新K线" value={latestCandle ? formatTimestamp(latestCandle.time) : "--"} />
+            <DataItem label="主信号" value={data.evaluation.rawSignal === "long" ? "做多" : data.evaluation.rawSignal === "short" ? "做空" : "无"} color={actionColor} />
+            <DataItem label="本地K线" value={`${data.candleCount} 根`} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px" }}>
+            <DataItem label="高周期状态" value={biasLabel(data.evaluation.higherTimeframeBias)} color={biasColor(data.evaluation.higherTimeframeBias)} />
+            <DataItem label="市场广度" value={biasLabel(data.evaluation.marketBreadthBias)} color={biasColor(data.evaluation.marketBreadthBias)} />
+            <DataItem label="快/慢均线" value={`${fmtIndicator(data.evaluation.indicators.fastSma)} / ${fmtIndicator(data.evaluation.indicators.slowSma)}`} />
+            <DataItem label="ATR" value={fmtIndicator(data.evaluation.indicators.atr)} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px" }}>
+            <DataItem label="方向限制" value={data.evaluation.checks.direction ? "通过" : "未通过"} color={data.evaluation.checks.direction ? "var(--color-long)" : "var(--color-hold)"} />
+            <DataItem label="高周期过滤" value={data.evaluation.checks.higherTimeframe ? "通过" : "未通过"} color={data.evaluation.checks.higherTimeframe ? "var(--color-long)" : "var(--color-hold)"} />
+            <DataItem label="广度过滤" value={data.evaluation.checks.marketBreadth ? "通过" : "未通过"} color={data.evaluation.checks.marketBreadth ? "var(--color-long)" : "var(--color-hold)"} />
+            <DataItem label="趋势质量" value={data.evaluation.checks.trendQuality ? "通过" : "未通过"} color={data.evaluation.checks.trendQuality ? "var(--color-long)" : "var(--color-hold)"} />
+          </div>
+
+          {diagnostics && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px" }}>
+              <DataItem label="广度有效标的" value={`${diagnostics.eligibleSymbols.length} / ${diagnostics.requestedSymbols.length}`} />
+              <DataItem label="平均有效标的" value={diagnostics.averageValidSymbols.toFixed(2)} />
+              <DataItem label="覆盖率" value={pct(diagnostics.coverageRatio)} />
+              <DataItem label="状态占比" value={`多 ${pct(diagnostics.stateCounts.bull / Math.max(1, diagnostics.usableBucketCount), 1)} / 空 ${pct(diagnostics.stateCounts.bear / Math.max(1, diagnostics.usableBucketCount), 1)}`} />
+            </div>
+          )}
+
+          <InfoList title="实时判定原因" items={data.evaluation.reasons.length ? data.evaluation.reasons : ["当前无额外判定原因。"]} />
+          <InfoList title="使用说明" items={["该面板读取 configs/locked-strategy-v1.json，按本地最新K线评估锁定策略状态。", "信号仅用于策略研究和本地验证，不构成任何真实交易建议。"]} warning />
+        </>
+      ) : (
+        <div style={{ padding: "22px", borderRadius: "8px", background: "rgba(255,255,255,0.03)", color: "var(--color-text-secondary)", fontSize: "13px" }}>未能读取锁定策略实时状态。请确认本地后端已启动，且 OKX / ETH_USDT / 1h 数据已完成补充。</div>
+      )}
+    </div>
+  );
 }
 
 function SignalCard({ signal }: { signal: CurrentSignal }) {
@@ -63,9 +153,30 @@ function SignalCard({ signal }: { signal: CurrentSignal }) {
 export default function SignalsView() {
   const { strategy, setStrategy, fastPeriod, setParams, slowPeriod, rsiPeriod, longRsiMax, shortRsiMin, adxPeriod, minAdx, atrPeriod, signal, signalHistory } = useStrategyStore();
   const { candles } = useMarketStore();
+  const [lockedSignal, setLockedSignal] = useState<RealtimeSignalResult | null>(null);
+  const [lockedSignalLoading, setLockedSignalLoading] = useState(false);
+
+  const refreshLockedSignal = async () => {
+    setLockedSignalLoading(true);
+    const result = await getRealtimeSignal();
+    setLockedSignal(result);
+    setLockedSignalLoading(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    void getRealtimeSignal().then((result) => {
+      if (!cancelled) setLockedSignal(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <div style={{ height: "100%", overflowY: "auto", padding: "20px", display: "flex", flexDirection: "column", gap: "20px" }}>
+      <LockedStrategySignalCard data={lockedSignal} loading={lockedSignalLoading} onRefresh={refreshLockedSignal} />
+
       <div style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
         <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginBottom: "12px" }}>选择策略</div>
         <div style={{ display: "flex", gap: "8px" }}>

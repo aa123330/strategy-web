@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { initDb } from "./db";
 import { registerCandleRoutes } from "./routes/candles";
 import { registerBacktestRoutes } from "./routes/backtest";
+import { registerRealtimeSignalRoutes } from "./routes/realtimeSignal";
 
 initDb();
 
@@ -10,6 +11,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 await registerCandleRoutes(app);
 await registerBacktestRoutes(app);
+await registerRealtimeSignalRoutes(app);
 
 app.get("/api/health", async () => ({ ok: true, time: Date.now() }));
 

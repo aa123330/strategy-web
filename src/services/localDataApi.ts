@@ -109,6 +109,56 @@ export interface BacktestResult {
   walkForward?: WalkForwardRow[];
 }
 
+export interface RealtimeSignalResult {
+  ok: true;
+  config: {
+    name: string;
+    description?: string;
+    validatedAt?: string;
+    exchange: string;
+    symbol: string;
+    interval: string;
+    strategy?: "dual_ma" | "sma_rsi_pullback";
+    fastPeriod?: number;
+    slowPeriod?: number;
+    tradeDirection?: TradeDirection;
+    useHigherTimeframeFilter?: boolean;
+    higherTimeframe?: HigherTimeframe;
+    higherTimeframeSmaPeriod?: number;
+    requireHigherTimeframeSlope?: boolean;
+    useMarketBreadthFilter?: boolean;
+    breadthSymbols?: string[];
+    breadthTimeframe?: HigherTimeframe;
+    breadthSmaPeriod?: number;
+    breadthBullThreshold?: number;
+    breadthBearThreshold?: number;
+    breadthNeutralMode?: BreadthNeutralMode;
+  };
+  range: CandleRange;
+  candleCount: number;
+  evaluation: {
+    latestCandle: LocalCandlesResponse["candles"][number] | null;
+    rawSignal: "long" | "short" | null;
+    finalAction: "open_long" | "open_short" | "hold";
+    finalSignal: "long" | "short" | null;
+    higherTimeframeBias: "bull" | "bear" | "neutral";
+    marketBreadthBias: "bull" | "bear" | "neutral";
+    checks: {
+      direction: boolean;
+      higherTimeframe: boolean;
+      marketBreadth: boolean;
+      trendQuality: boolean;
+    };
+    indicators: {
+      fastSma: number | null;
+      slowSma: number | null;
+      atr: number | null;
+    };
+    reasons: string[];
+    marketBreadthDiagnostics?: MarketBreadthDiagnostics;
+  };
+}
+
 const LOCAL_API_BASE = "/local-api";
 
 export function normalizeLocalCandle(row: LocalCandlesResponse["candles"][number]): CandleRow {
@@ -193,6 +243,16 @@ export async function getBackfillJob(id: string): Promise<BackfillResult | null>
     const resp = await fetch(`${LOCAL_API_BASE}/backfill/${id}`);
     if (!resp.ok) return null;
     return (await resp.json()) as BackfillResult;
+  } catch {
+    return null;
+  }
+}
+
+export async function getRealtimeSignal(): Promise<RealtimeSignalResult | null> {
+  try {
+    const resp = await fetch(`${LOCAL_API_BASE}/realtime-signal`);
+    if (!resp.ok) return null;
+    return (await resp.json()) as RealtimeSignalResult;
   } catch {
     return null;
   }
