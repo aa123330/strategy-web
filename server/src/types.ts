@@ -36,6 +36,8 @@ export interface BacktestTrade {
   exitPrice: number;
   pnlPct: number;
   reason: string;
+  marketBreadthBias?: "bull" | "bear" | "neutral";
+  filteredByMarketBreadth?: boolean;
 }
 
 export interface BacktestMetrics {

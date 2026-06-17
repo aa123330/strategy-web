@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { BarChart3, Database, RefreshCw } from "lucide-react";
 import { useMarketStore, useStrategyStore, type HigherTimeframe } from "../store";
-import { backfillLocalCandles, getBackfillJob, getLocalCandles, runBacktest, type BackfillJob, type BacktestMetrics, type BacktestResult, type CandleRange, type DirectionBreakdown, type TradeDirection } from "../services/localDataApi";
+import { backfillLocalCandles, getBackfillJob, getLocalCandles, runBacktest, type BackfillJob, type BacktestMetrics, type BacktestResult, type BacktestTrade, type BreadthNeutralMode, type CandleRange, type DirectionBreakdown, type MarketBreadthDiagnostics, type TradeDirection } from "../services/localDataApi";
 
 const BACKFILL_JOB_STORAGE_KEY = "strategy-web.backfill-job";
 const BACKFILL_FORM_STORAGE_KEY = "strategy-web.backfill-form";
@@ -77,6 +77,43 @@ function reasonText(reason: string) {
   return map[reason] ?? reason;
 }
 
+function monthKey(ts: number) {
+  const date = new Date(ts * 1000);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function metricsFromTrades(trades: BacktestTrade[]): Pick<BacktestMetrics, "totalReturn" | "profitFactor" | "winRate" | "trades"> {
+  const wins = trades.filter((trade) => trade.pnlPct > 0);
+  const losses = trades.filter((trade) => trade.pnlPct <= 0);
+  const grossProfit = wins.reduce((sum, trade) => sum + trade.pnlPct, 0);
+  const grossLoss = Math.abs(losses.reduce((sum, trade) => sum + trade.pnlPct, 0));
+  const equity = trades.reduce((value, trade) => value * (1 + trade.pnlPct), 1);
+  return {
+    trades: trades.length,
+    totalReturn: equity - 1,
+    winRate: trades.length ? wins.length / trades.length : 0,
+    profitFactor: grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 99 : 0,
+  };
+}
+
+function avg(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function breadthBiasText(bias: "bull" | "bear" | "neutral") {
+  const map = { bull: "多头广度", bear: "空头广度", neutral: "中性广度" };
+  return map[bias];
+}
+
+function nearestCandle(candles: Array<{ time: number; open: number; high: number; low: number; close: number }>, targetTime: number) {
+  let best = candles[0] ?? null;
+  for (const candle of candles) {
+    if (candle.time <= targetTime) best = candle;
+    else break;
+  }
+  return best;
+}
+
 function directionText(direction: TradeDirection) {
   const map: Record<TradeDirection, string> = {
     both: "双向",
@@ -134,6 +171,110 @@ interface ConservativeValidationRow {
   signalDelayBars: number;
   conservativeSameBarExit: boolean;
   result: BacktestResult | null;
+  error?: string;
+}
+
+interface MarketBreadthWindowRow {
+  windowDays: number;
+  baseline: BacktestResult | null;
+  filtered: BacktestResult | null;
+  error?: string;
+}
+
+interface MarketBreadthConservativeRow {
+  mode: "normal" | "conservative";
+  label: string;
+  signalDelayBars: number;
+  conservativeSameBarExit: boolean;
+  result: BacktestResult | null;
+  error?: string;
+}
+
+interface MarketBreadthStateRow {
+  bias: "bull" | "bear" | "neutral";
+  baseline: Pick<BacktestMetrics, "totalReturn" | "profitFactor" | "winRate" | "trades">;
+  kept: Pick<BacktestMetrics, "totalReturn" | "profitFactor" | "winRate" | "trades">;
+  filtered: Pick<BacktestMetrics, "totalReturn" | "profitFactor" | "winRate" | "trades">;
+  diagnosis: string;
+}
+
+interface MarketBreadthStateDiagnostics {
+  result: BacktestResult;
+  rows: MarketBreadthStateRow[];
+}
+
+interface MarketBreadthCoverageDiagnostics {
+  result: BacktestResult;
+  diagnostics: MarketBreadthDiagnostics;
+  conclusion: string;
+}
+
+interface MarketBreadthPoolCoverageRow {
+  label: string;
+  symbols: string[];
+  result: BacktestResult | null;
+  diagnostics?: MarketBreadthDiagnostics;
+  conclusion: string;
+  error?: string;
+}
+
+interface CandidateDiagnostics {
+  result: BacktestResult;
+  monthly: Array<{ month: string; trades: number; totalReturn: number; profitFactor: number; winRate: number }>;
+  worstMonth: { month: string; totalReturn: number } | null;
+  bestMonth: { month: string; totalReturn: number } | null;
+  maxDrawdownRun: { startTime: number; endTime: number; drawdown: number } | null;
+  worstLossStreak: { count: number; startTime: number; endTime: number; totalReturn: number } | null;
+  exitReasonRows: Array<{ reason: string; count: number }>;
+}
+
+interface LossZoneDiagnostics {
+  result: BacktestResult;
+  lossTrades: Array<BacktestTrade & { holdHours: number; month: string; atrPct: number | null; bodyRatio: number | null; distanceToSma: number | null }>;
+  monthStates: Array<{ month: string; trades: number; lossTrades: number; totalReturn: number; avgAtrPct: number; avgBodyRatio: number; avgDistanceToSma: number; falseBreakRisk: string }>;
+  worstLossMonth: string | null;
+}
+
+interface TrendQualityComparisonRow {
+  minSlowSmaDistancePct: number;
+  minAtrPct: number;
+  result: BacktestResult | null;
+  aprilReturn: number | null;
+  aprilLossTrades: number | null;
+  marchReturn: number | null;
+  juneReturn: number | null;
+  score: number;
+  tags: string[];
+  error?: string;
+}
+
+interface StopLossCircuitComparisonRow {
+  lookbackTrades: number;
+  minStops: number;
+  cooldownBars: number;
+  result: BacktestResult | null;
+  aprilReturn: number | null;
+  aprilLossTrades: number | null;
+  marchReturn: number | null;
+  juneReturn: number | null;
+  score: number;
+  tags: string[];
+  error?: string;
+}
+
+interface MarketBreadthComparisonRow {
+  symbols: string[];
+  breadthTimeframe: HigherTimeframe;
+  breadthSmaPeriod: number;
+  threshold: number;
+  breadthNeutralMode: BreadthNeutralMode;
+  result: BacktestResult | null;
+  aprilReturn: number | null;
+  aprilLossTrades: number | null;
+  marchReturn: number | null;
+  juneReturn: number | null;
+  score: number;
+  tags: string[];
   error?: string;
 }
 
@@ -352,9 +493,151 @@ interface LockedHigherTimeframeCandidate {
   };
 }
 
+interface LockedMarketBreadthCandidate {
+  symbols: string[];
+  breadthTimeframe: HigherTimeframe;
+  breadthSmaPeriod: number;
+  threshold: number;
+  breadthNeutralMode: BreadthNeutralMode;
+  source?: {
+    totalReturn: number;
+    profitFactor: number;
+    maxDrawdown: number;
+    trades: number;
+  };
+}
+
 function lockedCandidateLabel(candidate: LockedHigherTimeframeCandidate | null) {
   if (!candidate) return null;
   return `双均线 / ${candidate.interval} / 双向 / 快${candidate.fastPeriod} 慢${candidate.slowPeriod} / ${candidate.higherTimeframe} SMA${candidate.higherTimeframeSmaPeriod} / ${candidate.requireHigherTimeframeSlope ? "斜率确认" : "仅位置"}`;
+}
+
+function lockedMarketBreadthLabel(candidate: LockedMarketBreadthCandidate | null) {
+  if (!candidate) return null;
+  return `${candidate.breadthTimeframe} / SMA${candidate.breadthSmaPeriod} / 阈值${pct(candidate.threshold)} / ${candidate.breadthNeutralMode === "block_all" ? "中性空仓" : "中性沿用"} / ${candidate.symbols.length}标的`;
+}
+
+function candleAtrPct(candles: Array<{ time: number; open: number; high: number; low: number; close: number }>, index: number, period = 14) {
+  if (index < period) return null;
+  let sum = 0;
+  for (let i = index - period + 1; i <= index; i += 1) {
+    const current = candles[i];
+    const prev = candles[i - 1];
+    sum += Math.max(current.high - current.low, Math.abs(current.high - prev.close), Math.abs(current.low - prev.close));
+  }
+  return sum / period / candles[index].close;
+}
+
+function candleSma(candles: Array<{ close: number }>, index: number, period: number) {
+  if (index + 1 < period) return null;
+  let sum = 0;
+  for (let i = index - period + 1; i <= index; i += 1) sum += candles[i].close;
+  return sum / period;
+}
+
+function buildLossZoneDiagnostics(result: BacktestResult, candles: Array<{ time: number; open: number; high: number; low: number; close: number }>, candidate: LockedHigherTimeframeCandidate): LossZoneDiagnostics {
+  const trades = result.split.test.trades ?? [];
+  const lossTrades = trades.filter((trade) => trade.pnlPct <= 0).map((trade) => {
+    const candleIndex = candles.findIndex((candle) => candle.time >= trade.entryTime);
+    const candle = candleIndex >= 0 ? candles[candleIndex] : nearestCandle(candles, trade.entryTime);
+    const atrPct = candleIndex >= 0 ? candleAtrPct(candles, candleIndex, candidate.atrPeriod) : null;
+    const sma = candleIndex >= 0 ? candleSma(candles, candleIndex, candidate.slowPeriod) : null;
+    const range = candle ? Math.max(candle.high - candle.low, 0) : 0;
+    return {
+      ...trade,
+      holdHours: (trade.exitTime - trade.entryTime) / 3600,
+      month: monthKey(trade.exitTime),
+      atrPct,
+      bodyRatio: candle && range > 0 ? Math.abs(candle.close - candle.open) / range : null,
+      distanceToSma: candle && sma ? (candle.close - sma) / candle.close : null,
+    };
+  });
+  const monthKeys = [...new Set(trades.map((trade) => monthKey(trade.exitTime)))].sort();
+  const monthStates = monthKeys.map((month) => {
+    const monthTrades = trades.filter((trade) => monthKey(trade.exitTime) === month);
+    const monthLossTrades = lossTrades.filter((trade) => trade.month === month);
+    const monthCandles = candles.filter((candle) => monthKey(candle.time) === month);
+    const atrValues = monthCandles.map((_, index) => candleAtrPct(monthCandles, index, candidate.atrPeriod)).filter((value): value is number => value !== null);
+    const bodyValues = monthCandles.map((candle) => {
+      const range = Math.max(candle.high - candle.low, 0);
+      return range > 0 ? Math.abs(candle.close - candle.open) / range : 0;
+    });
+    const distanceValues = monthCandles.map((_, index) => {
+      const sma = candleSma(monthCandles, index, candidate.slowPeriod);
+      return sma ? Math.abs((monthCandles[index].close - sma) / monthCandles[index].close) : null;
+    }).filter((value): value is number => value !== null);
+    const stats = metricsFromTrades(monthTrades);
+    const avgBodyRatio = avg(bodyValues);
+    const avgDistanceToSma = avg(distanceValues);
+    const falseBreakRisk = avgBodyRatio < 0.42 && avgDistanceToSma < 0.018 ? "偏震荡/假突破" : avgDistanceToSma < 0.015 ? "贴近均线" : "趋势较清晰";
+    return {
+      month,
+      trades: stats.trades,
+      lossTrades: monthLossTrades.length,
+      totalReturn: stats.totalReturn,
+      avgAtrPct: avg(atrValues),
+      avgBodyRatio,
+      avgDistanceToSma,
+      falseBreakRisk,
+    };
+  });
+  const worstLossMonth = monthStates.length ? monthStates.reduce((worst, row) => row.totalReturn < worst.totalReturn ? row : worst).month : null;
+  return { result, lossTrades, monthStates, worstLossMonth };
+}
+
+function analyzeCandidate(result: BacktestResult): CandidateDiagnostics {
+  const trades = result.split.test.trades ?? [];
+  const monthlyMap = new Map<string, BacktestTrade[]>();
+  for (const trade of trades) {
+    const key = monthKey(trade.exitTime);
+    monthlyMap.set(key, [...(monthlyMap.get(key) ?? []), trade]);
+  }
+  const monthly = [...monthlyMap.entries()].map(([month, monthTrades]) => {
+    const stats = metricsFromTrades(monthTrades);
+    return { month, trades: stats.trades, totalReturn: stats.totalReturn, profitFactor: stats.profitFactor, winRate: stats.winRate };
+  }).sort((a, b) => a.month.localeCompare(b.month));
+  const worstMonth = monthly.length ? monthly.reduce((worst, row) => row.totalReturn < worst.totalReturn ? row : worst) : null;
+  const bestMonth = monthly.length ? monthly.reduce((best, row) => row.totalReturn > best.totalReturn ? row : best) : null;
+
+  let equity = 1;
+  let peak = 1;
+  let peakTime = trades[0]?.entryTime ?? 0;
+  let maxDrawdownRun: CandidateDiagnostics["maxDrawdownRun"] = null;
+  for (const trade of trades) {
+    equity *= 1 + trade.pnlPct;
+    if (equity > peak) {
+      peak = equity;
+      peakTime = trade.exitTime;
+    }
+    const drawdown = equity / peak - 1;
+    if (!maxDrawdownRun || drawdown < maxDrawdownRun.drawdown) {
+      maxDrawdownRun = { startTime: peakTime, endTime: trade.exitTime, drawdown };
+    }
+  }
+
+  let currentLosses: BacktestTrade[] = [];
+  let worstLosses: BacktestTrade[] = [];
+  for (const trade of trades) {
+    if (trade.pnlPct <= 0) {
+      currentLosses = [...currentLosses, trade];
+      if (currentLosses.length > worstLosses.length) worstLosses = currentLosses;
+    } else {
+      currentLosses = [];
+    }
+  }
+  const worstLossStreak = worstLosses.length
+    ? {
+      count: worstLosses.length,
+      startTime: worstLosses[0].entryTime,
+      endTime: worstLosses[worstLosses.length - 1].exitTime,
+      totalReturn: metricsFromTrades(worstLosses).totalReturn,
+    }
+    : null;
+  const exitReasonRows = Object.entries(result.split.test.exitReasons ?? {})
+    .map(([reason, count]) => ({ reason, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return { result, monthly, worstMonth, bestMonth, maxDrawdownRun, worstLossStreak, exitReasonRows };
 }
 
 function scoreOptimization(real: BacktestResult | null) {
@@ -566,6 +849,279 @@ function ParameterOptimization({ rows, loading, progress, currentRank, activeStr
   );
 }
 
+function monthReturn(result: BacktestResult | null, month: string) {
+  const trades = result?.split.test.trades ?? [];
+  const monthTrades = trades.filter((trade) => monthKey(trade.exitTime) === month);
+  return monthTrades.length ? metricsFromTrades(monthTrades).totalReturn : null;
+}
+
+function monthLossTrades(result: BacktestResult | null, month: string) {
+  const trades = result?.split.test.trades ?? [];
+  return trades.filter((trade) => monthKey(trade.exitTime) === month && trade.pnlPct <= 0).length;
+}
+
+function diagnoseTrendQualityRow(row: TrendQualityComparisonRow, baseline: BacktestResult | null) {
+  const metrics = row.result?.split.test.metrics;
+  const baseMetrics = baseline?.split.test.metrics;
+  const tags: string[] = [];
+  if (!metrics || !baseMetrics) return ["样本不足"];
+  if (metrics.totalReturn >= baseMetrics.totalReturn * 0.9 && metrics.profitFactor > baseMetrics.profitFactor) tags.push("PF改善");
+  if (row.aprilReturn !== null && row.aprilReturn > -0.01) tags.push("4月亏损收窄");
+  if (metrics.trades < baseMetrics.trades * 0.6) tags.push("交易过少");
+  if (metrics.totalReturn < baseMetrics.totalReturn * 0.75) tags.push("收益牺牲过大");
+  if (metrics.maxDrawdown > baseMetrics.maxDrawdown) tags.push("回撤改善");
+  return tags.length ? tags : ["变化有限"];
+}
+
+function diagnoseStopLossCircuitRow(row: StopLossCircuitComparisonRow, baseline: BacktestResult | null) {
+  const metrics = row.result?.split.test.metrics;
+  const baseMetrics = baseline?.split.test.metrics;
+  const baseAprilReturn = monthReturn(baseline, "2026-04");
+  const baseAprilLossTrades = monthLossTrades(baseline, "2026-04");
+  const tags: string[] = [];
+  if (!metrics || !baseMetrics) return ["样本不足"];
+  if (row.aprilReturn !== null && baseAprilReturn !== null && row.aprilReturn > baseAprilReturn) tags.push("4月改善");
+  if (row.aprilLossTrades !== null && row.aprilLossTrades < baseAprilLossTrades) tags.push("4月亏损减少");
+  if (metrics.maxDrawdown > baseMetrics.maxDrawdown) tags.push("回撤改善");
+  if (metrics.totalReturn >= baseMetrics.totalReturn * 0.85) tags.push("收益保留");
+  if (metrics.trades < baseMetrics.trades * 0.65) tags.push("交易过少");
+  if (metrics.totalReturn < baseMetrics.totalReturn * 0.7) tags.push("过度熔断");
+  return tags.length ? tags : ["变化有限"];
+}
+
+function diagnoseMarketBreadthRow(row: MarketBreadthComparisonRow, baseline: BacktestResult | null) {
+  const metrics = row.result?.split.test.metrics;
+  const baseMetrics = baseline?.split.test.metrics;
+  const baseAprilReturn = monthReturn(baseline, "2026-04");
+  const baseAprilLossTrades = monthLossTrades(baseline, "2026-04");
+  const breakdown = row.result?.split.test.directionBreakdown;
+  const tags: string[] = [];
+  if (!metrics || !baseMetrics) return ["样本不足"];
+  if (row.aprilReturn !== null && baseAprilReturn !== null && row.aprilReturn > baseAprilReturn) tags.push("4月改善");
+  if (row.aprilLossTrades !== null && baseAprilLossTrades !== null && row.aprilLossTrades < baseAprilLossTrades) tags.push("4月亏损减少");
+  if (metrics.maxDrawdown > baseMetrics.maxDrawdown) tags.push("回撤改善");
+  if (metrics.totalReturn >= baseMetrics.totalReturn * 0.85) tags.push("收益保留");
+  if (breakdown && breakdown.long.totalReturn > 0 && breakdown.short.totalReturn > 0) tags.push("多空均衡");
+  if (metrics.trades < baseMetrics.trades * 0.6) tags.push("交易过少");
+  if (metrics.totalReturn < baseMetrics.totalReturn * 0.7) tags.push("过度过滤");
+  return tags.length ? tags : ["变化有限"];
+}
+
+function scoreMarketBreadthRow(result: BacktestResult | null, baseline: BacktestResult | null, aprilReturn: number | null) {
+  const metrics = result?.split.test.metrics;
+  const baseMetrics = baseline?.split.test.metrics;
+  if (!metrics || !baseMetrics) return Number.NEGATIVE_INFINITY;
+  const tradeRetention = baseMetrics.trades > 0 ? metrics.trades / baseMetrics.trades : 0;
+  const returnRetention = baseMetrics.totalReturn > 0 ? metrics.totalReturn / baseMetrics.totalReturn : 0;
+  const tradePenalty = tradeRetention < 0.6 ? (0.6 - tradeRetention) * 260 : 0;
+  const returnPenalty = returnRetention < 0.85 ? (0.85 - returnRetention) * 220 : 0;
+  const robustBonus = metrics.totalReturn >= baseMetrics.totalReturn * 0.85 && metrics.profitFactor > baseMetrics.profitFactor && metrics.maxDrawdown > baseMetrics.maxDrawdown && metrics.trades >= baseMetrics.trades * 0.6 ? 90 : 0;
+  return metrics.totalReturn * 240 + metrics.profitFactor * 38 - Math.abs(metrics.maxDrawdown) * 70 + (aprilReturn ?? 0) * 150 + tradeRetention * 28 + robustBonus - tradePenalty - returnPenalty;
+}
+
+function MarketBreadthComparison({ rows, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun, onLock }: { rows: MarketBreadthComparisonRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void; onLock: (row: MarketBreadthComparisonRow) => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+  const best = rows[0];
+  const bestMetrics = best?.result?.split.test.metrics;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度择时过滤参数对照</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>参考主流合约池的广度状态：多数标的在 SMA 上方且斜率向上只允许做多，多数在 SMA 下方且斜率向下只允许做空；中性环境可选择空仓或沿用当前过滤。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "对照中..." : "运行市场广度对照"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定主候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定主候选。请先锁定高周期过滤候选。</div>}
+      {breadthLabel && <div style={{ marginBottom: "10px", color: "var(--color-long)", fontSize: "12px" }}>锁定市场广度候选：{breadthLabel}</div>}
+      {bestMetrics && <div style={{ marginBottom: "10px", color: "var(--color-long)", fontSize: "12px" }}>当前稳健第一名：{best.breadthTimeframe} / SMA{best.breadthSmaPeriod} / 阈值 {pct(best.threshold)} / {best.breadthNeutralMode === "block_all" ? "中性空仓" : "中性沿用原过滤"}，收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，4月 {best.aprilReturn === null ? "--" : pct(best.aprilReturn)}。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ marginBottom: "10px", color: "var(--color-text-secondary)", fontSize: "12px" }}>提示：该功能依赖本地多标的历史数据。建议先补充 OKX 的 BTC_USDT, ETH_USDT, SOL_USDT, BNB_USDT, XRP_USDT, DOGE_USDT, AVAX_USDT, LINK_USDT，周期至少包含 1h。</div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>广度参数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标的池</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月亏损</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>3月/6月</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>多/空</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>操作</th></tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={13} style={{ padding: "12px", textAlign: "center" }}>点击“运行市场广度对照”开始扫描 72 组参数。</td></tr>}
+            {rows.map((row, index) => {
+              const metrics = row.result?.split.test.metrics;
+              const breakdown = row.result?.split.test.directionBreakdown;
+              return <tr key={`${row.symbols.join("-")}-${row.breadthTimeframe}-${row.breadthSmaPeriod}-${row.threshold}-${row.breadthNeutralMode}`}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>#{index + 1}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{row.breadthTimeframe} / SMA{row.breadthSmaPeriod} / ≥{pct(row.threshold)} / {row.breadthNeutralMode === "block_all" ? "中性空仓" : "中性沿用"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.symbols.length}个</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? metrics.trades : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.aprilReturn !== null && row.aprilReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{row.aprilReturn === null ? "--" : pct(row.aprilReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.aprilLossTrades ?? "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{row.marchReturn === null ? "--" : pct(row.marchReturn)} / {row.juneReturn === null ? "--" : pct(row.juneReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{breakdown ? `${pct(breakdown.long.totalReturn)} / ${pct(breakdown.short.totalReturn)}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.tags.includes("4月改善") || row.tags.includes("多空均衡") ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}><button onClick={() => onLock(row)} disabled={!row.result} style={{ padding: "5px 8px", borderRadius: "6px", border: "1px solid var(--color-border)", background: "var(--color-bg-elevated)", color: "var(--color-text-primary)", cursor: row.result ? "pointer" : "default", whiteSpace: "nowrap" }}>锁定</button></td></tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function StopLossCircuitComparison({ rows, loading, progress, lockedCandidate, onRun }: { rows: StopLossCircuitComparisonRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const best = rows[0];
+  const bestMetrics = best?.result?.split.test.metrics;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>连续止损熔断参数对照</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>只统计固定止损。当最近 N 笔交易内固定止损次数达到阈值时暂停开仓 M 根K线，用于缓解 4 月假突破连续止损。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "对照中..." : "运行止损熔断对照"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先锁定高周期过滤候选。</div>}
+      {bestMetrics && <div style={{ marginBottom: "10px", color: "var(--color-long)", fontSize: "12px" }}>当前第一名：最近 {best.lookbackTrades} 笔内固定止损 ≥ {best.minStops} 次，熔断 {best.cooldownBars} 根K线；收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，4月 {best.aprilReturn === null ? "--" : pct(best.aprilReturn)}。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>熔断参数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月亏损</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>3月/6月</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th></tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={10} style={{ padding: "12px", textAlign: "center" }}>点击“运行止损熔断对照”开始扫描 24 组参数。</td></tr>}
+            {rows.map((row, index) => {
+              const metrics = row.result?.split.test.metrics;
+              return <tr key={`${row.lookbackTrades}-${row.minStops}-${row.cooldownBars}`}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>#{index + 1}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>近{row.lookbackTrades}笔 / 止损≥{row.minStops} / 暂停{row.cooldownBars}根</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? metrics.trades : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.aprilReturn !== null && row.aprilReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{row.aprilReturn === null ? "--" : pct(row.aprilReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.aprilLossTrades ?? "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{row.marchReturn === null ? "--" : pct(row.marchReturn)} / {row.juneReturn === null ? "--" : pct(row.juneReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.tags.includes("4月改善") || row.tags.includes("回撤改善") ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td></tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function TrendQualityComparison({ rows, loading, progress, lockedCandidate, onRun }: { rows: TrendQualityComparisonRow[]; loading: boolean; progress: string | null; baseline: BacktestResult | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const best = rows[0];
+  const bestMetrics = best?.result?.split.test.metrics;
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>趋势质量过滤参数对照</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>基于锁定候选扫描慢均线距离阈值和 ATR% 下限，观察是否能降低 4 月假突破亏损，同时保留 3 月/6 月趋势收益。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "对照中..." : "运行趋势质量对照"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先锁定高周期过滤候选。</div>}
+      {bestMetrics && <div style={{ marginBottom: "10px", color: "var(--color-long)", fontSize: "12px" }}>当前第一名：均线距离 ≥ {pct(best.minSlowSmaDistancePct)} / ATR ≥ {pct(best.minAtrPct)}，收益 {pct(bestMetrics.totalReturn)}，PF {num(bestMetrics.profitFactor)}，4月 {best.aprilReturn === null ? "--" : pct(best.aprilReturn)}。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+          <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>排名</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>过滤参数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>4月亏损</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>3月/6月</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标签</th></tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={10} style={{ padding: "12px", textAlign: "center" }}>点击“运行趋势质量对照”开始扫描 12 组参数。</td></tr>}
+            {rows.map((row, index) => {
+              const metrics = row.result?.split.test.metrics;
+              return <tr key={`${row.minSlowSmaDistancePct}-${row.minAtrPct}`}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>#{index + 1}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>距均线≥{pct(row.minSlowSmaDistancePct)} / ATR≥{pct(row.minAtrPct)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? metrics.trades : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.aprilReturn !== null && row.aprilReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{row.aprilReturn === null ? "--" : pct(row.aprilReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.aprilLossTrades ?? "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{row.marchReturn === null ? "--" : pct(row.marchReturn)} / {row.juneReturn === null ? "--" : pct(row.juneReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.tags.includes("PF改善") || row.tags.includes("4月亏损收窄") ? "var(--color-long)" : "#ffaa00" }}>{row.tags.join(" / ") || row.error || "--"}</td></tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function LossZoneDiagnosticsPanel({ diagnostics, loading, progress, lockedCandidate, onRun }: { diagnostics: LossZoneDiagnostics | null; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const worstMonthState = diagnostics?.monthStates.find((row) => row.month === diagnostics.worstLossMonth);
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>主候选亏损区间诊断</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>拆解亏损交易、月度波动率、K线实体占比和均线距离，用于识别 4 月这类低质量信号环境。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "诊断中..." : "运行亏损区间诊断"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先锁定高周期过滤候选。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {worstMonthState && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>当前最弱月份：{worstMonthState.month}，收益 {pct(worstMonthState.totalReturn)}，亏损交易 {worstMonthState.lossTrades}/{worstMonthState.trades}，状态判断：{worstMonthState.falseBreakRisk}。</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: "12px" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+            <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>月份</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>亏损/交易</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>ATR%</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>实体占比</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>均线距离</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>状态</th></tr></thead>
+            <tbody>
+              {!diagnostics?.monthStates.length && <tr><td colSpan={7} style={{ padding: "12px", textAlign: "center" }}>点击“运行亏损区间诊断”开始分析。</td></tr>}
+              {diagnostics?.monthStates.map((row) => <tr key={row.month}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.month}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{pct(row.totalReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.lossTrades}/{row.trades}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(row.avgAtrPct)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(row.avgBodyRatio)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(row.avgDistanceToSma)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.falseBreakRisk.includes("趋势") ? "var(--color-long)" : "#ffaa00" }}>{row.falseBreakRisk}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+            <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>方向</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>入场</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>出场</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>持仓h</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原因</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>ATR%</th></tr></thead>
+            <tbody>
+              {!diagnostics?.lossTrades.length && <tr><td colSpan={7} style={{ padding: "12px", textAlign: "center" }}>暂无亏损交易。</td></tr>}
+              {diagnostics?.lossTrades.map((trade) => <tr key={`${trade.entryTime}-${trade.exitTime}-${trade.side}`}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: trade.side === "long" ? "var(--color-long)" : "var(--color-short)", fontWeight: 600 }}>{trade.side === "long" ? "做多" : "做空"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{fmtTime(trade.entryTime)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{fmtTime(trade.exitTime)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{num(trade.holdHours)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-short)" }}>{pct(trade.pnlPct)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{reasonText(trade.reason)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{trade.atrPct === null ? "--" : pct(trade.atrPct)}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CandidateDeepDiagnostics({ diagnostics, loading, progress, lockedCandidate, onRun }: { diagnostics: CandidateDiagnostics | null; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
+  const metrics = diagnostics?.result.split.test.metrics;
+  const breakdown = diagnostics?.result.split.test.directionBreakdown;
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div>
+          <div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>主候选细化验证</div>
+          <div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>基于已锁定候选，拆解月度收益、最大回撤区间、最长连亏、多空贡献和退出原因，用于判断策略是否可进入下一轮实盘模拟。</div>
+        </div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>
+          {loading ? "分析中..." : "运行主候选细化验证"}
+        </button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "10px", color: "var(--color-btn-primary)", fontSize: "12px" }}>锁定候选：{candidateLabel}</div>}
+      {!candidateLabel && <div style={{ marginBottom: "10px", color: "#ffaa00", fontSize: "12px" }}>尚未锁定候选。请先在“高周期过滤参数优化”中点击“一键应用当前第一名并锁定”。</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {metrics && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px", marginBottom: "12px" }}>
+          <MetricCard label="测试段收益" value={pct(metrics.totalReturn)} hint={`PF ${num(metrics.profitFactor)} / 胜率 ${pct(metrics.winRate)}`} />
+          <MetricCard label="最大回撤区间" value={diagnostics?.maxDrawdownRun ? pct(diagnostics.maxDrawdownRun.drawdown) : "--"} hint={diagnostics?.maxDrawdownRun ? `${fmtTime(diagnostics.maxDrawdownRun.startTime)} → ${fmtTime(diagnostics.maxDrawdownRun.endTime)}` : undefined} />
+          <MetricCard label="最长连亏" value={diagnostics?.worstLossStreak ? `${diagnostics.worstLossStreak.count} 笔` : "0 笔"} hint={diagnostics?.worstLossStreak ? `累计 ${pct(diagnostics.worstLossStreak.totalReturn)}` : "无连续亏损"} />
+          <MetricCard label="最佳/最差月份" value={`${diagnostics?.bestMonth ? pct(diagnostics.bestMonth.totalReturn) : "--"} / ${diagnostics?.worstMonth ? pct(diagnostics.worstMonth.totalReturn) : "--"}`} hint={`${diagnostics?.bestMonth?.month ?? "--"} / ${diagnostics?.worstMonth?.month ?? "--"}`} />
+        </div>
+      )}
+      {breakdown && <div style={{ marginBottom: "12px", color: "var(--color-text-secondary)", fontSize: "12px" }}>多空贡献：做多 {pct(breakdown.long.totalReturn)} / PF {num(breakdown.long.profitFactor)} / {breakdown.long.trades} 笔；做空 {pct(breakdown.short.totalReturn)} / PF {num(breakdown.short.profitFactor)} / {breakdown.short.trades} 笔。</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "12px" }}>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}>
+            <thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>月份</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th></tr></thead>
+            <tbody>
+              {!diagnostics?.monthly.length && <tr><td colSpan={5} style={{ padding: "12px", textAlign: "center", color: "var(--color-text-secondary)" }}>点击“运行主候选细化验证”开始拆解。</td></tr>}
+              {diagnostics?.monthly.map((row) => <tr key={row.month}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.month}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{pct(row.totalReturn)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{pct(row.winRate)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{num(row.profitFactor)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.trades}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ backgroundColor: "rgba(255,255,255,0.03)", border: "1px solid var(--color-border)", borderRadius: "8px", padding: "10px", fontSize: "12px", color: "var(--color-text-secondary)", lineHeight: 1.7 }}>
+          <div style={{ color: "var(--color-text-primary)", fontWeight: 600, marginBottom: "6px" }}>退出原因</div>
+          {!diagnostics?.exitReasonRows.length && <div>暂无退出统计</div>}
+          {diagnostics?.exitReasonRows.map((row) => <div key={row.reason}>{reasonText(row.reason)}：{row.count} 笔</div>)}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ConservativeValidation({ rows, loading, progress, lockedCandidate, onRun }: { rows: ConservativeValidationRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; onRun: () => void }) {
   const normal = rows.find((row) => row.mode === "normal")?.result?.split.test.metrics;
   const conservative = rows.find((row) => row.mode === "conservative")?.result?.split.test.metrics;
@@ -710,6 +1266,104 @@ function HigherTimeframeWindowValidation({ rows, loading, progress, lockedCandid
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+function MarketBreadthWindowValidation({ rows, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun }: { rows: MarketBreadthWindowRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void }) {
+  const improved = rows.filter((row) => {
+    const baseline = row.baseline?.split.test.metrics;
+    const filtered = row.filtered?.split.test.metrics;
+    return baseline && filtered && filtered.totalReturn > baseline.totalReturn && filtered.profitFactor >= baseline.profitFactor;
+  }).length;
+  const summary = rows.length ? `市场广度过滤在 ${improved} / ${rows.length} 个窗口中同时改善收益与 PF。` : "";
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}>
+        <div><div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度分窗稳定性验证</div><div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>用已锁定市场广度候选，对比最近 90 / 180 / 270 / 360 天的原主候选与广度过滤后表现。</div></div>
+        <button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>{loading ? "验证中..." : "运行广度分窗验证"}</button>
+      </div>
+      {candidateLabel && <div style={{ marginBottom: "8px", color: "var(--color-btn-primary)", fontSize: "12px" }}>主候选：{candidateLabel}</div>}
+      {breadthLabel && <div style={{ marginBottom: "8px", color: "var(--color-long)", fontSize: "12px" }}>市场广度候选：{breadthLabel}</div>}
+      {summary && <div style={{ marginBottom: "10px", color: improved >= Math.ceil(rows.length / 2) ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{summary}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}><thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>窗口</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>广度收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>广度PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>广度回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th></tr></thead><tbody>{rows.length === 0 && <tr><td colSpan={9} style={{ padding: "12px", textAlign: "center" }}>锁定市场广度候选后运行分窗验证。</td></tr>}{rows.map((row) => { const baseline = row.baseline?.split.test.metrics; const filtered = row.filtered?.split.test.metrics; const ok = baseline && filtered && filtered.totalReturn > baseline.totalReturn && filtered.profitFactor >= baseline.profitFactor; return <tr key={row.windowDays}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.windowDays}天</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline ? pct(baseline.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: filtered && filtered.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{filtered ? pct(filtered.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline ? num(baseline.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: filtered && filtered.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{filtered ? num(filtered.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline ? pct(baseline.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{filtered ? pct(filtered.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{baseline && filtered ? `${baseline.trades} → ${filtered.trades}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: ok ? "var(--color-long)" : "#ffaa00" }}>{row.error ?? (ok ? "同时改善" : "未同时改善")}</td></tr>; })}</tbody></table></div>
+    </section>
+  );
+}
+
+function MarketBreadthConservativeValidation({ rows, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun }: { rows: MarketBreadthConservativeRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+  const conservative = rows.find((row) => row.mode === "conservative")?.result?.split.test.metrics;
+  const passed = !!conservative && conservative.totalReturn > 0 && conservative.profitFactor > 1.2 && conservative.maxDrawdown > -0.08 && conservative.trades >= 6;
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}><div><div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度保守回测验证</div><div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>对锁定市场广度候选执行普通模式与保守模式对照，检查延迟入场和同K线冲突优先止损后是否仍正期望。</div></div><button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>{loading ? "验证中..." : "运行广度保守验证"}</button></div>
+      {candidateLabel && <div style={{ marginBottom: "8px", color: "var(--color-btn-primary)", fontSize: "12px" }}>主候选：{candidateLabel}</div>}
+      {breadthLabel && <div style={{ marginBottom: "8px", color: "var(--color-long)", fontSize: "12px" }}>市场广度候选：{breadthLabel}</div>}
+      {rows.length > 0 && <div style={{ marginBottom: "10px", color: passed ? "var(--color-long)" : "#ffaa00", fontSize: "12px" }}>{passed ? "市场广度候选保守验证通过。" : "市场广度候选保守验证未完全通过，需检查收益/PF/回撤/交易数。"}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}><thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>模式</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>胜率</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>回撤</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>交易数</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>多空拆分</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th></tr></thead><tbody>{rows.length === 0 && <tr><td colSpan={8} style={{ padding: "12px", textAlign: "center" }}>锁定市场广度候选后运行保守验证。</td></tr>}{rows.map((row) => { const metrics = row.result?.split.test.metrics; const breakdown = row.result?.split.test.directionBreakdown; const ok = metrics && metrics.totalReturn > 0 && metrics.profitFactor > 1; return <tr key={row.mode}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.label}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)" }}>{metrics ? pct(metrics.totalReturn) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.winRate) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.profitFactor >= 1 ? "var(--color-long)" : "#ffaa00" }}>{metrics ? num(metrics.profitFactor) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? pct(metrics.maxDrawdown) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{metrics ? metrics.trades : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{breakdown ? `多 ${pct(breakdown.long.totalReturn)} / 空 ${pct(breakdown.short.totalReturn)}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: ok ? "var(--color-long)" : "#ffaa00" }}>{row.error ?? (ok ? "正期望" : "未通过")}</td></tr>; })}</tbody></table></div>
+    </section>
+  );
+}
+
+function MarketBreadthStateDiagnosticsPanel({ diagnostics, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun }: { diagnostics: MarketBreadthStateDiagnostics | null; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}><div><div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度状态贡献诊断</div><div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>拆解 bull / bear / neutral 状态下原策略交易、广度保留交易和被过滤交易收益，判断中性空仓是否真的过滤了亏损。</div></div><button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>{loading ? "诊断中..." : "运行广度状态诊断"}</button></div>
+      {candidateLabel && <div style={{ marginBottom: "8px", color: "var(--color-btn-primary)", fontSize: "12px" }}>主候选：{candidateLabel}</div>}
+      {breadthLabel && <div style={{ marginBottom: "8px", color: "var(--color-long)", fontSize: "12px" }}>市场广度候选：{breadthLabel}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}><thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>状态</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原交易</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>原收益/PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>保留交易</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>保留收益/PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>被过滤交易</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>被过滤收益/PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th></tr></thead><tbody>{!diagnostics && <tr><td colSpan={8} style={{ padding: "12px", textAlign: "center" }}>锁定市场广度候选后运行状态贡献诊断。</td></tr>}{diagnostics?.rows.map((row) => <tr key={row.bias}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{breadthBiasText(row.bias)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.baseline.trades}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.baseline.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)", fontFamily: "var(--font-mono)" }}>{pct(row.baseline.totalReturn)} / {num(row.baseline.profitFactor)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.kept.trades}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.kept.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)", fontFamily: "var(--font-mono)" }}>{pct(row.kept.totalReturn)} / {num(row.kept.profitFactor)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{row.filtered.trades}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.filtered.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)", fontFamily: "var(--font-mono)" }}>{pct(row.filtered.totalReturn)} / {num(row.filtered.profitFactor)}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.diagnosis.includes("有效") || row.diagnosis.includes("健康") ? "var(--color-long)" : "#ffaa00" }}>{row.diagnosis}</td></tr>)}</tbody></table></div>
+    </section>
+  );
+}
+
+function MarketBreadthCoverageDiagnosticsPanel({ diagnostics, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun }: { diagnostics: MarketBreadthCoverageDiagnostics | null; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+  const data = diagnostics?.diagnostics;
+  const stateTotal = data ? data.stateCounts.bull + data.stateCounts.bear + data.stateCounts.neutral : 0;
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}><div><div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度有效标的诊断</div><div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>检查锁定广度池里实际参与计算的标的数、可用高周期桶覆盖率和 bull / bear / neutral 状态占比，用来解释 4 标的池与 8 标的池是否实际等价。</div></div><button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>{loading ? "诊断中..." : "运行有效标的诊断"}</button></div>
+      {candidateLabel && <div style={{ marginBottom: "8px", color: "var(--color-btn-primary)", fontSize: "12px" }}>主候选：{candidateLabel}</div>}
+      {breadthLabel && <div style={{ marginBottom: "8px", color: "var(--color-long)", fontSize: "12px" }}>市场广度候选：{breadthLabel}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      {data && <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(120px, 1fr))", gap: "10px", marginBottom: "12px" }}>
+        <MetricCard label="请求/有效标的" value={`${data.requestedSymbols.length} / ${data.eligibleSymbols.length}`} hint={`最低要求 ${data.minRequiredSymbols} 个`} />
+        <MetricCard label="平均有效标的" value={num(data.averageValidSymbols)} hint={`区间 ${data.minValidSymbols} - ${data.maxValidSymbols}`} />
+        <MetricCard label="可用桶覆盖率" value={pct(data.coverageRatio)} hint={`${data.usableBucketCount} / ${data.bucketCount} 个高周期桶`} />
+        <MetricCard label="平均多/空比例" value={`${pct(data.averageBullRatio)} / ${pct(data.averageBearRatio)}`} hint="按可用广度桶平均" />
+      </div>}
+      {data && <div style={{ marginBottom: "10px", color: diagnostics.conclusion.includes("等同") || diagnostics.conclusion.includes("不足") ? "#ffaa00" : "var(--color-long)", fontSize: "12px" }}>{diagnostics.conclusion}</div>}
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}><thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>项目</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>值</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>说明</th></tr></thead><tbody>{!data && <tr><td colSpan={3} style={{ padding: "12px", textAlign: "center" }}>锁定市场广度候选后运行有效标的诊断。</td></tr>}{data && <><tr><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>状态占比</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>多 {stateTotal ? pct(data.stateCounts.bull / stateTotal) : "--"} / 空 {stateTotal ? pct(data.stateCounts.bear / stateTotal) : "--"} / 中性 {stateTotal ? pct(data.stateCounts.neutral / stateTotal) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>按可计算广度桶统计，非按交易数统计。</td></tr>{data.symbolStats.map((item) => <tr key={item.symbol}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{item.symbol}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{item.rawCandles} 根 / {item.bucketCandles} 桶 / 可用 {item.usableBuckets} 桶</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: item.usableBuckets > 0 ? "var(--color-long)" : "#ffaa00" }}>{item.usableBuckets > 0 ? "参与广度计算" : "未参与有效广度计算，可能未补足历史"}</td></tr>)}</>}</tbody></table></div>
+    </section>
+  );
+}
+
+function MarketBreadthPoolCoverageComparison({ rows, loading, progress, lockedCandidate, lockedBreadthCandidate, onRun }: { rows: MarketBreadthPoolCoverageRow[]; loading: boolean; progress: string | null; lockedCandidate: LockedHigherTimeframeCandidate | null; lockedBreadthCandidate: LockedMarketBreadthCandidate | null; onRun: () => void }) {
+  const candidateLabel = lockedCandidateLabel(lockedCandidate);
+  const breadthLabel = lockedMarketBreadthLabel(lockedBreadthCandidate);
+  const stateRatio = (data: MarketBreadthDiagnostics | undefined, state: "bull" | "bear" | "neutral") => {
+    if (!data) return "--";
+    const total = data.stateCounts.bull + data.stateCounts.bear + data.stateCounts.neutral;
+    return total ? pct(data.stateCounts[state] / total) : "--";
+  };
+  return (
+    <section style={{ backgroundColor: "var(--color-bg-card)", border: "1px solid var(--color-border)", borderRadius: "10px", padding: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", marginBottom: "12px" }}><div><div style={{ fontSize: "13px", color: "var(--color-text-primary)", fontWeight: 600 }}>市场广度标的池覆盖对照</div><div style={{ fontSize: "12px", color: "var(--color-text-secondary)", marginTop: "4px" }}>固定已锁定的广度周期、SMA、阈值和中性模式，仅对比 4 标的池与 8 标的池是否真正提供额外市场信息。</div></div><button onClick={onRun} disabled={loading} style={{ padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--color-border)", background: loading ? "rgba(26,115,232,0.14)" : "var(--color-bg-elevated)", color: loading ? "var(--color-btn-primary)" : "var(--color-text-primary)", cursor: loading ? "default" : "pointer" }}>{loading ? "对照中..." : "运行标的池对照"}</button></div>
+      {candidateLabel && <div style={{ marginBottom: "8px", color: "var(--color-btn-primary)", fontSize: "12px" }}>主候选：{candidateLabel}</div>}
+      {breadthLabel && <div style={{ marginBottom: "8px", color: "var(--color-long)", fontSize: "12px" }}>当前广度参数：{breadthLabel}</div>}
+      {progress && <div style={{ marginBottom: "10px", color: loading ? "var(--color-btn-primary)" : "var(--color-text-secondary)", fontSize: "12px" }}>{progress}</div>}
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: "12px", color: "var(--color-text-secondary)" }}><thead><tr style={{ color: "var(--color-text-primary)", textAlign: "left" }}><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>标的池</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>请求/有效</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>平均有效</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>覆盖率</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>状态占比</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>收益/PF</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>回撤/交易</th><th style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>诊断</th></tr></thead><tbody>{rows.length === 0 && <tr><td colSpan={8} style={{ padding: "12px", textAlign: "center" }}>锁定市场广度候选后运行标的池覆盖对照。</td></tr>}{rows.map((row) => { const metrics = row.result?.split.test.metrics; const data = row.diagnostics; return <tr key={row.label}><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: "var(--color-text-primary)", fontWeight: 600 }}>{row.label}<div style={{ fontSize: "11px", color: "var(--color-text-secondary)", marginTop: "4px" }}>{row.symbols.join(" / ")}</div></td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{data ? `${data.requestedSymbols.length} / ${data.eligibleSymbols.length}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{data ? num(data.averageValidSymbols) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)" }}>{data ? pct(data.coverageRatio) : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>多 {stateRatio(data, "bull")} / 空 {stateRatio(data, "bear")} / 中 {stateRatio(data, "neutral")}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: metrics && metrics.totalReturn >= 0 ? "var(--color-long)" : "var(--color-short)", fontFamily: "var(--font-mono)" }}>{metrics ? `${pct(metrics.totalReturn)} / ${num(metrics.profitFactor)}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", fontFamily: "var(--font-mono)" }}>{metrics ? `${pct(metrics.maxDrawdown)} / ${metrics.trades}` : "--"}</td><td style={{ padding: "8px", borderBottom: "1px solid var(--color-border)", color: row.conclusion.includes("未补足") || row.conclusion.includes("等同") ? "#ffaa00" : "var(--color-long)" }}>{row.error ?? row.conclusion}</td></tr>; })}</tbody></table></div>
     </section>
   );
 }
@@ -918,6 +1572,38 @@ export default function BacktestView() {
   const [higherTimeframeWindowRows, setHigherTimeframeWindowRows] = useState<HigherTimeframeWindowRow[]>([]);
   const [higherTimeframeWindowProgress, setHigherTimeframeWindowProgress] = useState<string | null>(null);
   const [lockedHigherTimeframeCandidate, setLockedHigherTimeframeCandidate] = useState<LockedHigherTimeframeCandidate | null>(null);
+  const [candidateDiagnosticsLoading, setCandidateDiagnosticsLoading] = useState(false);
+  const [candidateDiagnostics, setCandidateDiagnostics] = useState<CandidateDiagnostics | null>(null);
+  const [candidateDiagnosticsProgress, setCandidateDiagnosticsProgress] = useState<string | null>(null);
+  const [lossZoneDiagnosticsLoading, setLossZoneDiagnosticsLoading] = useState(false);
+  const [lossZoneDiagnostics, setLossZoneDiagnostics] = useState<LossZoneDiagnostics | null>(null);
+  const [lossZoneDiagnosticsProgress, setLossZoneDiagnosticsProgress] = useState<string | null>(null);
+  const [trendQualityLoading, setTrendQualityLoading] = useState(false);
+  const [trendQualityRows, setTrendQualityRows] = useState<TrendQualityComparisonRow[]>([]);
+  const [trendQualityBaseline, setTrendQualityBaseline] = useState<BacktestResult | null>(null);
+  const [trendQualityProgress, setTrendQualityProgress] = useState<string | null>(null);
+  const [stopLossCircuitLoading, setStopLossCircuitLoading] = useState(false);
+  const [stopLossCircuitRows, setStopLossCircuitRows] = useState<StopLossCircuitComparisonRow[]>([]);
+  const [stopLossCircuitProgress, setStopLossCircuitProgress] = useState<string | null>(null);
+  const [marketBreadthLoading, setMarketBreadthLoading] = useState(false);
+  const [marketBreadthRows, setMarketBreadthRows] = useState<MarketBreadthComparisonRow[]>([]);
+  const [marketBreadthProgress, setMarketBreadthProgress] = useState<string | null>(null);
+  const [lockedMarketBreadthCandidate, setLockedMarketBreadthCandidate] = useState<LockedMarketBreadthCandidate | null>(null);
+  const [marketBreadthWindowLoading, setMarketBreadthWindowLoading] = useState(false);
+  const [marketBreadthWindowRows, setMarketBreadthWindowRows] = useState<MarketBreadthWindowRow[]>([]);
+  const [marketBreadthWindowProgress, setMarketBreadthWindowProgress] = useState<string | null>(null);
+  const [marketBreadthConservativeLoading, setMarketBreadthConservativeLoading] = useState(false);
+  const [marketBreadthConservativeRows, setMarketBreadthConservativeRows] = useState<MarketBreadthConservativeRow[]>([]);
+  const [marketBreadthConservativeProgress, setMarketBreadthConservativeProgress] = useState<string | null>(null);
+  const [marketBreadthStateLoading, setMarketBreadthStateLoading] = useState(false);
+  const [marketBreadthStateDiagnostics, setMarketBreadthStateDiagnostics] = useState<MarketBreadthStateDiagnostics | null>(null);
+  const [marketBreadthStateProgress, setMarketBreadthStateProgress] = useState<string | null>(null);
+  const [marketBreadthCoverageLoading, setMarketBreadthCoverageLoading] = useState(false);
+  const [marketBreadthCoverageDiagnostics, setMarketBreadthCoverageDiagnostics] = useState<MarketBreadthCoverageDiagnostics | null>(null);
+  const [marketBreadthCoverageProgress, setMarketBreadthCoverageProgress] = useState<string | null>(null);
+  const [marketBreadthPoolLoading, setMarketBreadthPoolLoading] = useState(false);
+  const [marketBreadthPoolRows, setMarketBreadthPoolRows] = useState<MarketBreadthPoolCoverageRow[]>([]);
+  const [marketBreadthPoolProgress, setMarketBreadthPoolProgress] = useState<string | null>(null);
   const [conservativeValidationLoading, setConservativeValidationLoading] = useState(false);
   const [conservativeValidationRows, setConservativeValidationRows] = useState<ConservativeValidationRow[]>([]);
   const [conservativeValidationProgress, setConservativeValidationProgress] = useState<string | null>(null);
@@ -1095,6 +1781,585 @@ export default function BacktestView() {
     }
     setDirectionStabilityProgress(`方向稳定性验证完成：已验证 ${combinations.length} 个组合。`);
     setDirectionStabilityLoading(false);
+  };
+
+  const runTrendQualityComparison = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setTrendQualityRows([]);
+      setTrendQualityProgress("请先在高周期过滤参数优化中锁定一个候选，再运行趋势质量对照。");
+      return;
+    }
+    setTrendQualityLoading(true);
+    setTrendQualityRows([]);
+    setTrendQualityBaseline(null);
+    setTrendQualityProgress("准备扫描 12 组趋势质量过滤参数...");
+    const distanceValues = [0, 0.015, 0.02, 0.025];
+    const atrValues = [0, 0.008, 0.01];
+    const combinations = distanceValues.flatMap((distance) => atrValues.map((atr) => ({ distance, atr })));
+    const commonParams = {
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+      signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+      conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
+    };
+    const baseline = await runBacktest({ ...commonParams, minSlowSmaDistancePct: 0, minAtrPct: 0 });
+    setTrendQualityBaseline(baseline);
+    const rows: TrendQualityComparisonRow[] = [];
+    for (let index = 0; index < combinations.length; index += 4) {
+      const batch = combinations.slice(index, index + 4);
+      setTrendQualityProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组趋势质量过滤参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const result = await runBacktest({ ...commonParams, minSlowSmaDistancePct: combo.distance, minAtrPct: combo.atr });
+        const metrics = result?.split.test.metrics;
+        const aprilReturn = monthReturn(result, "2026-04");
+        const row: TrendQualityComparisonRow = {
+          minSlowSmaDistancePct: combo.distance,
+          minAtrPct: combo.atr,
+          result,
+          aprilReturn,
+          aprilLossTrades: monthLossTrades(result, "2026-04"),
+          marchReturn: monthReturn(result, "2026-03"),
+          juneReturn: monthReturn(result, "2026-06"),
+          score: metrics ? metrics.profitFactor * 40 + metrics.totalReturn * 120 + (aprilReturn ?? 0) * 80 - Math.abs(metrics.maxDrawdown) * 40 + metrics.trades * 0.1 : Number.NEGATIVE_INFINITY,
+          tags: [],
+          error: result ? undefined : "样本不足",
+        };
+        row.tags = diagnoseTrendQualityRow(row, baseline);
+        return row;
+      }));
+      rows.push(...batchRows);
+      setTrendQualityRows([...rows].sort((a, b) => b.score - a.score));
+    }
+    setTrendQualityRows([...rows].sort((a, b) => b.score - a.score));
+    setTrendQualityProgress(`趋势质量过滤对照完成：已扫描 ${combinations.length} 组参数。`);
+    setTrendQualityLoading(false);
+  };
+
+  const lockMarketBreadthCandidate = (row: MarketBreadthComparisonRow) => {
+    const metrics = row.result?.split.test.metrics;
+    setLockedMarketBreadthCandidate({
+      symbols: row.symbols,
+      breadthTimeframe: row.breadthTimeframe,
+      breadthSmaPeriod: row.breadthSmaPeriod,
+      threshold: row.threshold,
+      breadthNeutralMode: row.breadthNeutralMode,
+      source: metrics ? {
+        totalReturn: metrics.totalReturn,
+        profitFactor: metrics.profitFactor,
+        maxDrawdown: metrics.maxDrawdown,
+        trades: metrics.trades,
+      } : undefined,
+    });
+    setMarketBreadthProgress(`已锁定市场广度候选：${row.breadthTimeframe} / SMA${row.breadthSmaPeriod} / 阈值${pct(row.threshold)} / ${row.breadthNeutralMode === "block_all" ? "中性空仓" : "中性沿用"}。`);
+  };
+
+  const marketBreadthBacktestParams = (overrides?: Partial<{ limit: number; signalDelayBars: number; conservativeSameBarExit: boolean; breadthSymbols: string[] }>) => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) return null;
+    return {
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      limit: overrides?.limit,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+      signalDelayBars: overrides?.signalDelayBars ?? lockedHigherTimeframeCandidate.signalDelayBars,
+      conservativeSameBarExit: overrides?.conservativeSameBarExit ?? lockedHigherTimeframeCandidate.conservativeSameBarExit,
+      useMarketBreadthFilter: true,
+      breadthSymbols: overrides?.breadthSymbols ?? lockedMarketBreadthCandidate.symbols,
+      breadthTimeframe: lockedMarketBreadthCandidate.breadthTimeframe,
+      breadthSmaPeriod: lockedMarketBreadthCandidate.breadthSmaPeriod,
+      breadthBullThreshold: lockedMarketBreadthCandidate.threshold,
+      breadthBearThreshold: lockedMarketBreadthCandidate.threshold,
+      breadthNeutralMode: lockedMarketBreadthCandidate.breadthNeutralMode,
+    };
+  };
+
+  const runMarketBreadthComparison = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setMarketBreadthRows([]);
+      setMarketBreadthProgress("请先在高周期过滤参数优化中锁定一个候选，再运行市场广度对照。");
+      return;
+    }
+    setMarketBreadthLoading(true);
+    setMarketBreadthRows([]);
+    setMarketBreadthProgress("准备扫描 72 组市场广度过滤参数...");
+    const symbolPools = [
+      ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT"],
+      ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "XRP_USDT", "DOGE_USDT", "AVAX_USDT", "LINK_USDT"],
+    ];
+    const timeframeValues: HigherTimeframe[] = ["4h", "1d"];
+    const smaValues = [20, 30, 50];
+    const thresholdValues = [0.5, 0.55, 0.6];
+    const neutralModes: BreadthNeutralMode[] = ["block_all", "allow_current_filter"];
+    const combinations = symbolPools.flatMap((symbols) =>
+      timeframeValues.flatMap((breadthTimeframe) =>
+        smaValues.flatMap((breadthSmaPeriod) =>
+          thresholdValues.flatMap((threshold) =>
+            neutralModes.map((breadthNeutralMode) => ({ symbols, breadthTimeframe, breadthSmaPeriod, threshold, breadthNeutralMode }))
+          )
+        )
+      )
+    );
+    const commonParams = {
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+      signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+      conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
+    };
+    const baseline = await runBacktest({ ...commonParams, useMarketBreadthFilter: false });
+    const rows: MarketBreadthComparisonRow[] = [];
+    for (let index = 0; index < combinations.length; index += 4) {
+      const batch = combinations.slice(index, index + 4);
+      setMarketBreadthProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组市场广度参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const result = await runBacktest({
+          ...commonParams,
+          useMarketBreadthFilter: true,
+          breadthSymbols: combo.symbols,
+          breadthTimeframe: combo.breadthTimeframe,
+          breadthSmaPeriod: combo.breadthSmaPeriod,
+          breadthBullThreshold: combo.threshold,
+          breadthBearThreshold: combo.threshold,
+          breadthNeutralMode: combo.breadthNeutralMode,
+        });
+        const aprilReturn = monthReturn(result, "2026-04");
+        const row: MarketBreadthComparisonRow = {
+          ...combo,
+          result,
+          aprilReturn,
+          aprilLossTrades: monthLossTrades(result, "2026-04"),
+          marchReturn: monthReturn(result, "2026-03"),
+          juneReturn: monthReturn(result, "2026-06"),
+          score: scoreMarketBreadthRow(result, baseline, aprilReturn),
+          tags: [],
+          error: result ? undefined : "样本不足或广度标的未补数",
+        };
+        row.tags = diagnoseMarketBreadthRow(row, baseline);
+        return row;
+      }));
+      rows.push(...batchRows);
+      setMarketBreadthRows([...rows].sort((a, b) => b.score - a.score));
+    }
+    const sortedRows = [...rows].sort((a, b) => b.score - a.score);
+    setMarketBreadthRows(sortedRows);
+    if (sortedRows[0]) lockMarketBreadthCandidate(sortedRows[0]);
+    setMarketBreadthProgress(`市场广度过滤对照完成：已扫描 ${combinations.length} 组参数。`);
+    setMarketBreadthLoading(false);
+  };
+
+  const runMarketBreadthWindowValidation = async () => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) {
+      setMarketBreadthWindowRows([]);
+      setMarketBreadthWindowProgress("请先锁定高周期主候选和市场广度候选，再运行市场广度分窗验证。");
+      return;
+    }
+    setMarketBreadthWindowLoading(true);
+    setMarketBreadthWindowRows([]);
+    setMarketBreadthWindowProgress("正在验证市场广度候选分窗稳定性...");
+    const windows = [90, 180, 270, 360];
+    const rows: MarketBreadthWindowRow[] = [];
+    for (const windowDays of windows) {
+      const limit = Math.max(300, windowDays * 24 + 120);
+      const breadthParams = marketBreadthBacktestParams({ limit });
+      if (!breadthParams) break;
+      const baseline = await runBacktest({ ...breadthParams, useMarketBreadthFilter: false });
+      const filtered = await runBacktest(breadthParams);
+      rows.push({ windowDays, baseline, filtered, error: filtered ? undefined : "样本不足" });
+      setMarketBreadthWindowRows([...rows]);
+      setMarketBreadthWindowProgress(`已完成 ${rows.length} / ${windows.length} 个窗口的市场广度分窗验证...`);
+    }
+    setMarketBreadthWindowProgress("市场广度分窗稳定性验证完成。");
+    setMarketBreadthWindowLoading(false);
+  };
+
+  const runMarketBreadthConservativeValidation = async () => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) {
+      setMarketBreadthConservativeRows([]);
+      setMarketBreadthConservativeProgress("请先锁定高周期主候选和市场广度候选，再运行市场广度保守验证。");
+      return;
+    }
+    setMarketBreadthConservativeLoading(true);
+    setMarketBreadthConservativeRows([]);
+    setMarketBreadthConservativeProgress("正在运行市场广度普通/保守回测对照...");
+    const modes: MarketBreadthConservativeRow[] = [
+      { mode: "normal", label: "普通", signalDelayBars: 0, conservativeSameBarExit: false, result: null },
+      { mode: "conservative", label: "保守", signalDelayBars: 1, conservativeSameBarExit: true, result: null },
+    ];
+    const rows: MarketBreadthConservativeRow[] = [];
+    for (const mode of modes) {
+      const params = marketBreadthBacktestParams({ signalDelayBars: mode.signalDelayBars, conservativeSameBarExit: mode.conservativeSameBarExit });
+      const result = params ? await runBacktest(params) : null;
+      rows.push({ ...mode, result, error: result ? undefined : "回测失败或样本不足" });
+      setMarketBreadthConservativeRows([...rows]);
+    }
+    setMarketBreadthConservativeProgress("市场广度普通/保守回测对照完成。");
+    setMarketBreadthConservativeLoading(false);
+  };
+
+  const diagnoseBreadthState = (bias: "bull" | "bear" | "neutral", baseline: ReturnType<typeof metricsFromTrades>, kept: ReturnType<typeof metricsFromTrades>, filtered: ReturnType<typeof metricsFromTrades>) => {
+    if (filtered.trades === 0) return kept.trades > 0 ? "状态保留健康" : "该状态无样本";
+    if (filtered.totalReturn < 0 && kept.totalReturn >= 0) return "过滤有效：剔除亏损交易";
+    if (filtered.totalReturn > 0 && kept.totalReturn < baseline.totalReturn) return "过滤偏严：剔除盈利交易";
+    if (bias === "neutral" && filtered.totalReturn < 0) return "中性空仓有效";
+    return "需继续观察";
+  };
+
+  const diagnoseBreadthCoverage = (diagnostics: MarketBreadthDiagnostics) => {
+    if (diagnostics.status === "insufficient_symbols" || diagnostics.eligibleSymbols.length < diagnostics.minRequiredSymbols) return `有效广度标的只有 ${diagnostics.eligibleSymbols.length} 个，低于最低要求 ${diagnostics.minRequiredSymbols} 个，当前广度判断可信度不足。`;
+    if (diagnostics.eligibleSymbols.length < diagnostics.requestedSymbols.length) return `请求 ${diagnostics.requestedSymbols.length} 个标的，但实际只有 ${diagnostics.eligibleSymbols.length} 个满足历史长度要求；若 8 标的池结果接近 4 标的池，优先检查未参与标的是否未补足历史。`;
+    if (diagnostics.averageValidSymbols < diagnostics.requestedSymbols.length * 0.8) return `虽然有 ${diagnostics.eligibleSymbols.length} 个标的满足总长度要求，但单个高周期桶平均只有 ${num(diagnostics.averageValidSymbols)} 个标的有效，部分标的覆盖不连续。`;
+    return `广度池覆盖健康：${diagnostics.eligibleSymbols.length} 个标的均具备足够历史，平均每个高周期桶有 ${num(diagnostics.averageValidSymbols)} 个有效标的参与计算。`;
+  };
+
+  const runMarketBreadthCoverageDiagnostics = async () => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) {
+      setMarketBreadthCoverageDiagnostics(null);
+      setMarketBreadthCoverageProgress("请先锁定高周期主候选和市场广度候选，再运行有效标的诊断。");
+      return;
+    }
+    setMarketBreadthCoverageLoading(true);
+    setMarketBreadthCoverageDiagnostics(null);
+    setMarketBreadthCoverageProgress("正在检查市场广度有效标的数与状态覆盖率...");
+    const params = marketBreadthBacktestParams();
+    const result = params ? await runBacktest(params) : null;
+    const diagnostics = result?.split.test.marketBreadthDiagnostics;
+    if (!result || !diagnostics) {
+      setMarketBreadthCoverageProgress("市场广度有效标的诊断失败：样本不足或回测结果为空。");
+      setMarketBreadthCoverageLoading(false);
+      return;
+    }
+    setMarketBreadthCoverageDiagnostics({ result, diagnostics, conclusion: diagnoseBreadthCoverage(diagnostics) });
+    setMarketBreadthCoverageProgress("市场广度有效标的诊断完成。");
+    setMarketBreadthCoverageLoading(false);
+  };
+
+  const runMarketBreadthPoolCoverageComparison = async () => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) {
+      setMarketBreadthPoolRows([]);
+      setMarketBreadthPoolProgress("请先锁定高周期主候选和市场广度候选，再运行标的池覆盖对照。");
+      return;
+    }
+    setMarketBreadthPoolLoading(true);
+    setMarketBreadthPoolRows([]);
+    setMarketBreadthPoolProgress("正在对比 4 标的池与 8 标的池...");
+    const pools = [
+      { label: "4标的池", symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT"] },
+      { label: "8标的池", symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT", "BNB_USDT", "XRP_USDT", "DOGE_USDT", "AVAX_USDT", "LINK_USDT"] },
+    ];
+    const rows: MarketBreadthPoolCoverageRow[] = [];
+    for (const pool of pools) {
+      setMarketBreadthPoolProgress(`正在运行${pool.label}覆盖对照...`);
+      const params = marketBreadthBacktestParams({ breadthSymbols: pool.symbols });
+      const result = params ? await runBacktest(params) : null;
+      const diagnostics = result?.split.test.marketBreadthDiagnostics;
+      rows.push({
+        label: pool.label,
+        symbols: pool.symbols,
+        result,
+        diagnostics,
+        conclusion: diagnostics ? diagnoseBreadthCoverage(diagnostics) : "回测失败或缺少广度诊断",
+        error: result && diagnostics ? undefined : "回测失败或缺少广度诊断",
+      });
+      setMarketBreadthPoolRows([...rows]);
+    }
+    const four = rows.find((row) => row.label === "4标的池");
+    const eight = rows.find((row) => row.label === "8标的池");
+    if (four?.diagnostics && eight?.diagnostics) {
+      const fourMetrics = four.result?.split.test.metrics;
+      const eightMetrics = eight.result?.split.test.metrics;
+      const sameEffectiveCount = eight.diagnostics.eligibleSymbols.length <= four.diagnostics.eligibleSymbols.length;
+      const closeReturn = !!fourMetrics && !!eightMetrics && Math.abs(fourMetrics.totalReturn - eightMetrics.totalReturn) < 0.001 && Math.abs(fourMetrics.profitFactor - eightMetrics.profitFactor) < 0.05;
+      setMarketBreadthPoolProgress(sameEffectiveCount
+        ? "标的池覆盖对照完成：8标的池没有增加有效标的，结果接近4标的池属于数据覆盖问题。"
+        : closeReturn
+          ? "标的池覆盖对照完成：8标的池有效标的更多，但结果接近4标的池，说明前4个标的已较好代表市场广度。"
+          : "标的池覆盖对照完成：8标的池带来了不同结果，后续可比较是否值得替换4标的池。"
+      );
+    } else {
+      setMarketBreadthPoolProgress("标的池覆盖对照完成，但部分结果缺少诊断数据。");
+    }
+    setMarketBreadthPoolLoading(false);
+  };
+
+  const runMarketBreadthStateDiagnostics = async () => {
+    if (!lockedHigherTimeframeCandidate || !lockedMarketBreadthCandidate) {
+      setMarketBreadthStateDiagnostics(null);
+      setMarketBreadthStateProgress("请先锁定高周期主候选和市场广度候选，再运行市场广度状态诊断。");
+      return;
+    }
+    setMarketBreadthStateLoading(true);
+    setMarketBreadthStateDiagnostics(null);
+    setMarketBreadthStateProgress("正在拆解市场广度状态贡献...");
+    const params = marketBreadthBacktestParams();
+    const result = params ? await runBacktest(params) : null;
+    if (!result) {
+      setMarketBreadthStateProgress("市场广度状态诊断失败：样本不足或回测结果为空。");
+      setMarketBreadthStateLoading(false);
+      return;
+    }
+    const actualTrades = result.split.test.trades ?? [];
+    const candidateTrades = result.split.test.candidateTrades ?? [];
+    const allTrades = [...actualTrades, ...candidateTrades];
+    const biases: Array<"bull" | "bear" | "neutral"> = ["bull", "bear", "neutral"];
+    const rows = biases.map((bias) => {
+      const baselineTrades = allTrades.filter((trade) => trade.marketBreadthBias === bias);
+      const keptTrades = actualTrades.filter((trade) => trade.marketBreadthBias === bias);
+      const filteredTrades = candidateTrades.filter((trade) => trade.marketBreadthBias === bias && trade.filteredByMarketBreadth);
+      const baseline = metricsFromTrades(baselineTrades);
+      const kept = metricsFromTrades(keptTrades);
+      const filtered = metricsFromTrades(filteredTrades);
+      return { bias, baseline, kept, filtered, diagnosis: diagnoseBreadthState(bias, baseline, kept, filtered) };
+    });
+    setMarketBreadthStateDiagnostics({ result, rows });
+    setMarketBreadthStateProgress("市场广度状态贡献诊断完成。");
+    setMarketBreadthStateLoading(false);
+  };
+
+  const runStopLossCircuitComparison = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setStopLossCircuitRows([]);
+      setStopLossCircuitProgress("请先在高周期过滤参数优化中锁定一个候选，再运行连续止损熔断对照。");
+      return;
+    }
+    setStopLossCircuitLoading(true);
+    setStopLossCircuitRows([]);
+    setStopLossCircuitProgress("准备扫描 24 组连续止损熔断参数...");
+    const lookbackValues = [3, 4, 5];
+    const minStopValues = [2, 3];
+    const cooldownValues = [12, 24, 36, 48];
+    const combinations = lookbackValues.flatMap((lookbackTrades) =>
+      minStopValues.flatMap((minStops) =>
+        cooldownValues.map((cooldownBars) => ({ lookbackTrades, minStops, cooldownBars }))
+      )
+    );
+    const commonParams = {
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+      signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+      conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
+    };
+    const baseline = await runBacktest({ ...commonParams, stopLossCircuitLookbackTrades: 0, stopLossCircuitMinStops: 0, stopLossCircuitCooldownBars: 0 });
+    const rows: StopLossCircuitComparisonRow[] = [];
+    for (let index = 0; index < combinations.length; index += 4) {
+      const batch = combinations.slice(index, index + 4);
+      setStopLossCircuitProgress(`正在扫描 ${Math.min(index + batch.length, combinations.length)} / ${combinations.length} 组连续止损熔断参数...`);
+      const batchRows = await Promise.all(batch.map(async (combo) => {
+        const result = await runBacktest({
+          ...commonParams,
+          stopLossCircuitLookbackTrades: combo.lookbackTrades,
+          stopLossCircuitMinStops: combo.minStops,
+          stopLossCircuitCooldownBars: combo.cooldownBars,
+        });
+        const metrics = result?.split.test.metrics;
+        const aprilReturn = monthReturn(result, "2026-04");
+        const row: StopLossCircuitComparisonRow = {
+          ...combo,
+          result,
+          aprilReturn,
+          aprilLossTrades: monthLossTrades(result, "2026-04"),
+          marchReturn: monthReturn(result, "2026-03"),
+          juneReturn: monthReturn(result, "2026-06"),
+          score: metrics ? metrics.profitFactor * 45 + metrics.totalReturn * 160 + (aprilReturn ?? 0) * 120 - Math.abs(metrics.maxDrawdown) * 45 + metrics.trades * 0.08 : Number.NEGATIVE_INFINITY,
+          tags: [],
+          error: result ? undefined : "样本不足",
+        };
+        row.tags = diagnoseStopLossCircuitRow(row, baseline);
+        return row;
+      }));
+      rows.push(...batchRows);
+      setStopLossCircuitRows([...rows].sort((a, b) => b.score - a.score));
+    }
+    setStopLossCircuitRows([...rows].sort((a, b) => b.score - a.score));
+    setStopLossCircuitProgress(`连续止损熔断对照完成：已扫描 ${combinations.length} 组参数。`);
+    setStopLossCircuitLoading(false);
+  };
+
+  const runLossZoneDiagnostics = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setLossZoneDiagnostics(null);
+      setLossZoneDiagnosticsProgress("请先在高周期过滤参数优化中锁定一个候选，再运行亏损区间诊断。");
+      return;
+    }
+    setLossZoneDiagnosticsLoading(true);
+    setLossZoneDiagnostics(null);
+    setLossZoneDiagnosticsProgress("正在拉取锁定候选回测结果和本地K线，拆解亏损环境...");
+    const [result, local] = await Promise.all([
+      runBacktest({
+        exchange: lockedHigherTimeframeCandidate.exchange,
+        symbol: "ETH_USDT",
+        interval: lockedHigherTimeframeCandidate.interval,
+        strategy: lockedHigherTimeframeCandidate.strategy,
+        fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+        slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+        rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+        longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+        shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+        adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+        minAdx: lockedHigherTimeframeCandidate.minAdx,
+        atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+        atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+        atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+        takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+        useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+        feeRate: lockedHigherTimeframeCandidate.feeRate,
+        slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+        cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+        maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+        tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+        useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+        higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+        higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+        requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+        signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+        conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
+      }),
+      getLocalCandles({ exchange: lockedHigherTimeframeCandidate.exchange, symbol: "ETH_USDT", interval: lockedHigherTimeframeCandidate.interval, limit: 10000 }),
+    ]);
+    if (!result || !local?.candles.length) {
+      setLossZoneDiagnosticsProgress("亏损区间诊断失败：本地样本不足或回测结果为空。");
+      setLossZoneDiagnosticsLoading(false);
+      return;
+    }
+    setLossZoneDiagnostics(buildLossZoneDiagnostics(result, local.candles, lockedHigherTimeframeCandidate));
+    setLossZoneDiagnosticsProgress("亏损区间诊断完成：已拆解亏损交易、月度波动率、实体占比和均线距离。");
+    setLossZoneDiagnosticsLoading(false);
+  };
+
+  const runCandidateDeepDiagnostics = async () => {
+    if (!lockedHigherTimeframeCandidate) {
+      setCandidateDiagnostics(null);
+      setCandidateDiagnosticsProgress("请先在高周期过滤参数优化中锁定一个候选，再运行主候选细化验证。");
+      return;
+    }
+    setCandidateDiagnosticsLoading(true);
+    setCandidateDiagnostics(null);
+    setCandidateDiagnosticsProgress("正在使用锁定候选拉取完整测试段交易明细...");
+    const result = await runBacktest({
+      exchange: lockedHigherTimeframeCandidate.exchange,
+      symbol: "ETH_USDT",
+      interval: lockedHigherTimeframeCandidate.interval,
+      strategy: lockedHigherTimeframeCandidate.strategy,
+      fastPeriod: lockedHigherTimeframeCandidate.fastPeriod,
+      slowPeriod: lockedHigherTimeframeCandidate.slowPeriod,
+      rsiPeriod: lockedHigherTimeframeCandidate.rsiPeriod,
+      longRsiMax: lockedHigherTimeframeCandidate.longRsiMax,
+      shortRsiMin: lockedHigherTimeframeCandidate.shortRsiMin,
+      adxPeriod: lockedHigherTimeframeCandidate.adxPeriod,
+      minAdx: lockedHigherTimeframeCandidate.minAdx,
+      atrPeriod: lockedHigherTimeframeCandidate.atrPeriod,
+      atrStopMultiplier: lockedHigherTimeframeCandidate.atrStopMultiplier,
+      atrTrailMultiplier: lockedHigherTimeframeCandidate.atrTrailMultiplier,
+      takeProfitAtrMultiplier: lockedHigherTimeframeCandidate.takeProfitAtrMultiplier,
+      useTrailingStop: lockedHigherTimeframeCandidate.useTrailingStop,
+      feeRate: lockedHigherTimeframeCandidate.feeRate,
+      slippageRate: lockedHigherTimeframeCandidate.slippageRate,
+      cooldownBars: lockedHigherTimeframeCandidate.cooldownBars,
+      maxHoldBars: lockedHigherTimeframeCandidate.maxHoldBars,
+      tradeDirection: lockedHigherTimeframeCandidate.tradeDirection,
+      useHigherTimeframeFilter: lockedHigherTimeframeCandidate.useHigherTimeframeFilter,
+      higherTimeframe: lockedHigherTimeframeCandidate.higherTimeframe,
+      higherTimeframeSmaPeriod: lockedHigherTimeframeCandidate.higherTimeframeSmaPeriod,
+      requireHigherTimeframeSlope: lockedHigherTimeframeCandidate.requireHigherTimeframeSlope,
+      signalDelayBars: lockedHigherTimeframeCandidate.signalDelayBars,
+      conservativeSameBarExit: lockedHigherTimeframeCandidate.conservativeSameBarExit,
+    });
+    if (!result) {
+      setCandidateDiagnosticsProgress("主候选细化验证失败：本地样本不足或后端返回为空。");
+      setCandidateDiagnosticsLoading(false);
+      return;
+    }
+    setCandidateDiagnostics(analyzeCandidate(result));
+    setCandidateDiagnosticsProgress("主候选细化验证完成：已拆解月度收益、回撤、连亏和退出原因。");
+    setCandidateDiagnosticsLoading(false);
   };
 
   const runConservativeValidation = async () => {
@@ -1338,8 +2603,16 @@ export default function BacktestView() {
     });
     setHigherTimeframeWindowRows([]);
     setConservativeValidationRows([]);
+    setCandidateDiagnostics(null);
+    setLossZoneDiagnostics(null);
+    setTrendQualityRows([]);
+    setStopLossCircuitRows([]);
     setHigherTimeframeWindowProgress("已锁定候选。请重新运行高周期分窗验证，结果将强制使用这组参数。");
     setConservativeValidationProgress("已锁定候选。请重新运行保守回测对照，结果将强制使用这组参数。");
+    setCandidateDiagnosticsProgress("已锁定候选。请运行主候选细化验证，查看月度收益、回撤和连亏拆解。");
+    setLossZoneDiagnosticsProgress("已锁定候选。请运行亏损区间诊断，识别低质量信号环境。");
+    setTrendQualityProgress("已锁定候选。请运行趋势质量过滤对照，验证均线距离和ATR过滤效果。");
+    setStopLossCircuitProgress("已锁定候选。请运行连续止损熔断对照，验证假突破连续止损后的动态冷却效果。");
     setValidationMessage(`已应用并锁定高周期过滤第一名：${row.higherTimeframe} / SMA${row.smaPeriod} / ${row.requireSlope ? "斜率确认" : "仅位置"}，后续分窗和保守验证将使用同一口径。`);
   };
 
@@ -1840,6 +3113,26 @@ export default function BacktestView() {
       <HigherTimeframeWindowValidation rows={higherTimeframeWindowRows} loading={higherTimeframeWindowLoading} progress={higherTimeframeWindowProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runHigherTimeframeWindowValidation()} />
 
       <ConservativeValidation rows={conservativeValidationRows} loading={conservativeValidationLoading} progress={conservativeValidationProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runConservativeValidation()} />
+
+      <CandidateDeepDiagnostics diagnostics={candidateDiagnostics} loading={candidateDiagnosticsLoading} progress={candidateDiagnosticsProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runCandidateDeepDiagnostics()} />
+
+      <LossZoneDiagnosticsPanel diagnostics={lossZoneDiagnostics} loading={lossZoneDiagnosticsLoading} progress={lossZoneDiagnosticsProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runLossZoneDiagnostics()} />
+
+      <TrendQualityComparison rows={trendQualityRows} loading={trendQualityLoading} progress={trendQualityProgress} baseline={trendQualityBaseline} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runTrendQualityComparison()} />
+
+      <StopLossCircuitComparison rows={stopLossCircuitRows} loading={stopLossCircuitLoading} progress={stopLossCircuitProgress} lockedCandidate={lockedHigherTimeframeCandidate} onRun={() => void runStopLossCircuitComparison()} />
+
+      <MarketBreadthComparison rows={marketBreadthRows} loading={marketBreadthLoading} progress={marketBreadthProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthComparison()} onLock={lockMarketBreadthCandidate} />
+
+      <MarketBreadthWindowValidation rows={marketBreadthWindowRows} loading={marketBreadthWindowLoading} progress={marketBreadthWindowProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthWindowValidation()} />
+
+      <MarketBreadthConservativeValidation rows={marketBreadthConservativeRows} loading={marketBreadthConservativeLoading} progress={marketBreadthConservativeProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthConservativeValidation()} />
+
+      <MarketBreadthStateDiagnosticsPanel diagnostics={marketBreadthStateDiagnostics} loading={marketBreadthStateLoading} progress={marketBreadthStateProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthStateDiagnostics()} />
+
+      <MarketBreadthCoverageDiagnosticsPanel diagnostics={marketBreadthCoverageDiagnostics} loading={marketBreadthCoverageLoading} progress={marketBreadthCoverageProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthCoverageDiagnostics()} />
+
+      <MarketBreadthPoolCoverageComparison rows={marketBreadthPoolRows} loading={marketBreadthPoolLoading} progress={marketBreadthPoolProgress} lockedCandidate={lockedHigherTimeframeCandidate} lockedBreadthCandidate={lockedMarketBreadthCandidate} onRun={() => void runMarketBreadthPoolCoverageComparison()} />
 
       <DefaultBenchmark benchmark={optimizationBenchmark} best={optimizationRows[0] ?? null} />
 

@@ -35,14 +35,54 @@ export interface BacktestMetrics {
 
 export type TradeDirection = "both" | "long_only" | "short_only";
 export type HigherTimeframe = "4h" | "1d";
+export type BreadthNeutralMode = "block_all" | "allow_current_filter";
 
 export interface DirectionBreakdown {
   long: BacktestMetrics;
   short: BacktestMetrics;
 }
 
+export interface MarketBreadthSymbolDiagnostics {
+  symbol: string;
+  rawCandles: number;
+  bucketCandles: number;
+  usableBuckets: number;
+}
+
+export interface MarketBreadthDiagnostics {
+  requestedSymbols: string[];
+  eligibleSymbols: string[];
+  minRequiredSymbols: number;
+  bucketCount: number;
+  usableBucketCount: number;
+  stateCounts: Record<"bull" | "bear" | "neutral", number>;
+  averageValidSymbols: number;
+  minValidSymbols: number;
+  maxValidSymbols: number;
+  averageBullRatio: number;
+  averageBearRatio: number;
+  coverageRatio: number;
+  symbolStats: MarketBreadthSymbolDiagnostics[];
+  status: "disabled" | "insufficient_symbols" | "ok";
+}
+
+export interface BacktestTrade {
+  side: "long" | "short";
+  entryTime: number;
+  exitTime: number;
+  entryPrice: number;
+  exitPrice: number;
+  pnlPct: number;
+  reason: string;
+  marketBreadthBias?: "bull" | "bear" | "neutral";
+  filteredByMarketBreadth?: boolean;
+}
+
 export interface BacktestSectionResult {
   metrics: BacktestMetrics;
+  trades?: BacktestTrade[];
+  candidateTrades?: BacktestTrade[];
+  marketBreadthDiagnostics?: MarketBreadthDiagnostics;
   exitReasons?: Record<string, number>;
   directionBreakdown?: DirectionBreakdown;
 }
@@ -188,6 +228,18 @@ export async function runBacktest(params: {
   requireHigherTimeframeSlope?: boolean;
   signalDelayBars?: number;
   conservativeSameBarExit?: boolean;
+  minSlowSmaDistancePct?: number;
+  minAtrPct?: number;
+  stopLossCircuitLookbackTrades?: number;
+  stopLossCircuitMinStops?: number;
+  stopLossCircuitCooldownBars?: number;
+  useMarketBreadthFilter?: boolean;
+  breadthSymbols?: string[];
+  breadthTimeframe?: HigherTimeframe;
+  breadthSmaPeriod?: number;
+  breadthBullThreshold?: number;
+  breadthBearThreshold?: number;
+  breadthNeutralMode?: BreadthNeutralMode;
 }): Promise<BacktestResult | null> {
   try {
     const resp = await fetch(`${LOCAL_API_BASE}/backtest`, {
@@ -224,6 +276,18 @@ export async function runBacktest(params: {
           requireHigherTimeframeSlope: params.requireHigherTimeframeSlope,
           signalDelayBars: params.signalDelayBars,
           conservativeSameBarExit: params.conservativeSameBarExit,
+          minSlowSmaDistancePct: params.minSlowSmaDistancePct,
+          minAtrPct: params.minAtrPct,
+          stopLossCircuitLookbackTrades: params.stopLossCircuitLookbackTrades,
+          stopLossCircuitMinStops: params.stopLossCircuitMinStops,
+          stopLossCircuitCooldownBars: params.stopLossCircuitCooldownBars,
+          useMarketBreadthFilter: params.useMarketBreadthFilter,
+          breadthSymbols: params.breadthSymbols,
+          breadthTimeframe: params.breadthTimeframe,
+          breadthSmaPeriod: params.breadthSmaPeriod,
+          breadthBullThreshold: params.breadthBullThreshold,
+          breadthBearThreshold: params.breadthBearThreshold,
+          breadthNeutralMode: params.breadthNeutralMode,
         },
       }),
     });

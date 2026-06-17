@@ -45,13 +45,36 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
         requireHigherTimeframeSlope?: boolean;
         signalDelayBars?: number;
         conservativeSameBarExit?: boolean;
+        minSlowSmaDistancePct?: number;
+        minAtrPct?: number;
+        stopLossCircuitLookbackTrades?: number;
+        stopLossCircuitMinStops?: number;
+        stopLossCircuitCooldownBars?: number;
+        useMarketBreadthFilter?: boolean;
+        breadthSymbols?: string[];
+        breadthTimeframe?: "4h" | "1d";
+        breadthSmaPeriod?: number;
+        breadthBullThreshold?: number;
+        breadthBearThreshold?: number;
+        breadthNeutralMode?: "block_all" | "allow_current_filter";
       };
     }> | undefined;
 
     const exchange = body?.exchange ?? "gate";
     const symbol = body?.symbol ?? "ETH_USDT";
     const interval = parseInterval(body?.interval);
-    const candles = getCandles({ exchange, symbol, interval, limit: body?.limit ?? 50000 });
+    const limit = body?.limit ?? 50000;
+    const candles = getCandles({ exchange, symbol, interval, limit });
+    const rawBreadthSymbols = body?.params?.breadthSymbols ?? [];
+    const breadthSymbols = [...new Set(rawBreadthSymbols.map((item) => String(item).trim()).filter(Boolean))].filter((item) => item !== symbol);
+    const breadthCandlesBySymbol = body?.params?.useMarketBreadthFilter
+      ? Object.fromEntries(
+        [symbol, ...breadthSymbols].map((breadthSymbol) => [
+          breadthSymbol,
+          getCandles({ exchange, symbol: breadthSymbol, interval, limit }),
+        ])
+      )
+      : undefined;
 
     if (candles.length < 200) {
       return reply.code(400).send({
@@ -69,6 +92,7 @@ export async function registerBacktestRoutes(app: FastifyInstance) {
         candles,
         trainRatio: body?.trainRatio,
         strategyParams: body?.params,
+        breadthCandlesBySymbol,
       }),
     };
   });

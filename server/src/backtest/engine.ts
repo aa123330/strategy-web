@@ -3,6 +3,7 @@ import type { BacktestMetrics, BacktestTrade, Candle } from "../types";
 export type BacktestStrategyName = "dual_ma" | "sma_rsi_pullback";
 export type TradeDirection = "both" | "long_only" | "short_only";
 export type HigherTimeframe = "4h" | "1d";
+export type BreadthNeutralMode = "block_all" | "allow_current_filter";
 
 export interface BacktestParams {
   strategy: BacktestStrategyName;
@@ -32,6 +33,17 @@ export interface BacktestParams {
   requireHigherTimeframeSlope: boolean;
   signalDelayBars: number;
   conservativeSameBarExit: boolean;
+  minSlowSmaDistancePct: number;
+  minAtrPct: number;
+  stopLossCircuitLookbackTrades: number;
+  stopLossCircuitMinStops: number;
+  stopLossCircuitCooldownBars: number;
+  useMarketBreadthFilter: boolean;
+  breadthTimeframe: HigherTimeframe;
+  breadthSmaPeriod: number;
+  breadthBullThreshold: number;
+  breadthBearThreshold: number;
+  breadthNeutralMode: BreadthNeutralMode;
 }
 
 export interface DirectionBreakdown {
@@ -39,9 +51,35 @@ export interface DirectionBreakdown {
   short: BacktestMetrics;
 }
 
+export interface MarketBreadthSymbolDiagnostics {
+  symbol: string;
+  rawCandles: number;
+  bucketCandles: number;
+  usableBuckets: number;
+}
+
+export interface MarketBreadthDiagnostics {
+  requestedSymbols: string[];
+  eligibleSymbols: string[];
+  minRequiredSymbols: number;
+  bucketCount: number;
+  usableBucketCount: number;
+  stateCounts: Record<"bull" | "bear" | "neutral", number>;
+  averageValidSymbols: number;
+  minValidSymbols: number;
+  maxValidSymbols: number;
+  averageBullRatio: number;
+  averageBearRatio: number;
+  coverageRatio: number;
+  symbolStats: MarketBreadthSymbolDiagnostics[];
+  status: "disabled" | "insufficient_symbols" | "ok";
+}
+
 export interface BacktestSectionResult {
   metrics: BacktestMetrics;
   trades: BacktestTrade[];
+  candidateTrades?: BacktestTrade[];
+  marketBreadthDiagnostics?: MarketBreadthDiagnostics;
   exitReasons: Record<string, number>;
   directionBreakdown: DirectionBreakdown;
 }
@@ -94,6 +132,17 @@ const DEFAULT_PARAMS: BacktestParams = {
   requireHigherTimeframeSlope: true,
   signalDelayBars: 0,
   conservativeSameBarExit: false,
+  minSlowSmaDistancePct: 0,
+  minAtrPct: 0,
+  stopLossCircuitLookbackTrades: 0,
+  stopLossCircuitMinStops: 0,
+  stopLossCircuitCooldownBars: 0,
+  useMarketBreadthFilter: false,
+  breadthTimeframe: "4h",
+  breadthSmaPeriod: 30,
+  breadthBullThreshold: 0.55,
+  breadthBearThreshold: 0.55,
+  breadthNeutralMode: "allow_current_filter",
 };
 
 function smaAt(candles: Candle[], index: number, period: number) {
@@ -181,6 +230,47 @@ function applyExitSlippage(price: number, side: "long" | "short", slippageRate: 
   return side === "long" ? price * (1 - slippageRate) : price * (1 + slippageRate);
 }
 
+function simulateTradeExit(candles: Candle[], entryIndex: number, side: "long" | "short", params: BacktestParams, marketBreadthBias: MarketBreadthBias, filteredByMarketBreadth: boolean): BacktestTrade | null {
+  const entryCandle = candles[entryIndex];
+  if (!entryCandle) return null;
+  const entryPrice = applyEntrySlippage(entryCandle.close, side, params.slippageRate);
+  const direction = side === "long" ? 1 : -1;
+  const atrValueAtEntry = atrAt(candles, entryIndex, params.atrPeriod);
+  const atrStopDistance = atrValueAtEntry === null ? entryPrice * params.stopLossPct : atrValueAtEntry * params.atrStopMultiplier;
+  let stopPrice: number | null = params.useTrailingStop ? entryPrice - direction * atrStopDistance : null;
+  for (let i = entryIndex + 1; i < candles.length; i += 1) {
+    const candle = candles[i];
+    const atrValue = atrAt(candles, i, params.atrPeriod);
+    if (params.useTrailingStop && atrValue !== null) {
+      const candidateStop = candle.close - direction * atrValue * params.atrTrailMultiplier;
+      stopPrice = stopPrice === null ? candidateStop : side === "long" ? Math.max(stopPrice, candidateStop) : Math.min(stopPrice, candidateStop);
+    }
+    const closeExitPriceWithSlippage = applyExitSlippage(candle.close, side, params.slippageRate);
+    const closeRawPnlPct = ((closeExitPriceWithSlippage - entryPrice) / entryPrice) * direction;
+    const atrTakeProfitPct = atrValue === null || params.takeProfitAtrMultiplier <= 0 ? null : (atrValue * params.takeProfitAtrMultiplier) / entryPrice;
+    const takeProfitPct = atrTakeProfitPct ?? params.takeProfitPct;
+    const fixedStopPrice = entryPrice * (side === "long" ? 1 - params.stopLossPct : 1 + params.stopLossPct);
+    const takeProfitPrice = entryPrice * (side === "long" ? 1 + takeProfitPct : 1 - takeProfitPct);
+    const touchedFixedStop = side === "long" ? candle.low <= fixedStopPrice : candle.high >= fixedStopPrice;
+    const touchedTakeProfit = side === "long" ? candle.high >= takeProfitPrice : candle.low <= takeProfitPrice;
+    const touchedTrailingStop = params.useTrailingStop && stopPrice !== null && (side === "long" ? candle.low <= stopPrice : candle.high >= stopPrice);
+    const crossedFixedStop = params.conservativeSameBarExit ? touchedFixedStop : closeRawPnlPct <= -params.stopLossPct;
+    const crossedTakeProfit = params.conservativeSameBarExit ? touchedTakeProfit : closeRawPnlPct >= takeProfitPct;
+    const crossedTrailingStop = params.conservativeSameBarExit ? touchedTrailingStop : params.useTrailingStop && stopPrice !== null && (side === "long" ? candle.close <= stopPrice : candle.close >= stopPrice);
+    const reversed = shouldReverseExit(candles, i, side, params);
+    const timedOut = params.maxHoldBars > 0 && i - entryIndex >= params.maxHoldBars;
+    if (crossedFixedStop || crossedTakeProfit || crossedTrailingStop || reversed || timedOut) {
+      const stopConflictsWithTakeProfit = params.conservativeSameBarExit && crossedTakeProfit && (crossedFixedStop || crossedTrailingStop);
+      const reason = stopConflictsWithTakeProfit ? crossedFixedStop ? "stop_loss" : "trailing_stop" : crossedFixedStop ? "stop_loss" : crossedTakeProfit ? "take_profit" : crossedTrailingStop ? "trailing_stop" : reversed ? "reverse" : "time_exit";
+      const rawExitPrice = reason === "stop_loss" ? fixedStopPrice : reason === "take_profit" ? takeProfitPrice : reason === "trailing_stop" && stopPrice !== null ? stopPrice : candle.close;
+      const exitPrice = applyExitSlippage(rawExitPrice, side, params.slippageRate);
+      const rawPnlPct = ((exitPrice - entryPrice) / entryPrice) * direction;
+      return { side, entryTime: entryCandle.time, exitTime: candle.time, entryPrice, exitPrice, pnlPct: rawPnlPct - tradingCost(params), reason, marketBreadthBias, filteredByMarketBreadth };
+    }
+  }
+  return null;
+}
+
 function isDirectionAllowed(signal: "long" | "short", tradeDirection: TradeDirection) {
   return tradeDirection === "both" || (tradeDirection === "long_only" && signal === "long") || (tradeDirection === "short_only" && signal === "short");
 }
@@ -190,6 +280,7 @@ function higherTimeframeSeconds(timeframe: HigherTimeframe) {
 }
 
 type HigherTimeframeBias = "bull" | "bear" | "neutral";
+type MarketBreadthBias = HigherTimeframeBias;
 
 type HigherTimeframeBucket = Candle & { firstIndex: number; lastIndex: number };
 
@@ -248,11 +339,159 @@ function buildHigherTimeframeBias(candles: Candle[], params: BacktestParams): Hi
   return biases;
 }
 
+function buildMarketBreadthBias(candles: Candle[], params: BacktestParams, breadthCandlesBySymbol?: Record<string, Candle[]>): { biases: MarketBreadthBias[]; diagnostics?: MarketBreadthDiagnostics } {
+  const biases: MarketBreadthBias[] = Array.from({ length: candles.length }, () => "neutral");
+  const requestedSymbols = Object.keys(breadthCandlesBySymbol ?? {});
+  const disabledDiagnostics = (status: MarketBreadthDiagnostics["status"]): MarketBreadthDiagnostics => ({
+    requestedSymbols,
+    eligibleSymbols: [],
+    minRequiredSymbols: 3,
+    bucketCount: 0,
+    usableBucketCount: 0,
+    stateCounts: { bull: 0, bear: 0, neutral: 0 },
+    averageValidSymbols: 0,
+    minValidSymbols: 0,
+    maxValidSymbols: 0,
+    averageBullRatio: 0,
+    averageBearRatio: 0,
+    coverageRatio: 0,
+    symbolStats: requestedSymbols.map((symbol) => ({ symbol, rawCandles: breadthCandlesBySymbol?.[symbol]?.length ?? 0, bucketCandles: 0, usableBuckets: 0 })),
+    status,
+  });
+  if (!params.useMarketBreadthFilter || !breadthCandlesBySymbol) return { biases, diagnostics: disabledDiagnostics("disabled") };
+
+  const symbols = requestedSymbols.filter((symbol) => breadthCandlesBySymbol[symbol].length >= Math.max(params.breadthSmaPeriod + 2, 30));
+  if (symbols.length < 3) return { biases, diagnostics: { ...disabledDiagnostics("insufficient_symbols"), eligibleSymbols: symbols } };
+
+  const seconds = higherTimeframeSeconds(params.breadthTimeframe);
+  const period = Math.max(2, Math.floor(params.breadthSmaPeriod));
+  const stateByBucketTime = new Map<number, MarketBreadthBias>();
+  const allBucketTimes = new Set<number>();
+  const bucketCandlesBySymbol = new Map<string, Candle[]>();
+  const symbolStats = new Map<string, MarketBreadthSymbolDiagnostics>();
+
+  for (const symbol of symbols) {
+    const sourceCandles = breadthCandlesBySymbol[symbol];
+    const bucketMap = new Map<number, Candle>();
+    for (const candle of sourceCandles) {
+      const bucketTime = Math.floor(candle.time / seconds) * seconds;
+      const existing = bucketMap.get(bucketTime);
+      if (!existing) {
+        bucketMap.set(bucketTime, { ...candle, time: bucketTime });
+        allBucketTimes.add(bucketTime);
+        continue;
+      }
+      existing.high = Math.max(existing.high, candle.high);
+      existing.low = Math.min(existing.low, candle.low);
+      existing.close = candle.close;
+      existing.volume += candle.volume;
+      existing.turnover = (existing.turnover ?? 0) + (candle.turnover ?? 0);
+    }
+    const series = [...bucketMap.values()].sort((a, b) => a.time - b.time);
+    bucketCandlesBySymbol.set(symbol, series);
+    symbolStats.set(symbol, { symbol, rawCandles: sourceCandles.length, bucketCandles: series.length, usableBuckets: 0 });
+  }
+
+  const validCounts: number[] = [];
+  const bullRatios: number[] = [];
+  const bearRatios: number[] = [];
+  const stateCounts: Record<MarketBreadthBias, number> = { bull: 0, bear: 0, neutral: 0 };
+  const sortedBucketTimes = [...allBucketTimes].sort((a, b) => a - b);
+  for (const bucketTime of sortedBucketTimes) {
+    let validCount = 0;
+    let bullCount = 0;
+    let bearCount = 0;
+    for (const symbol of symbols) {
+      const series = bucketCandlesBySymbol.get(symbol) ?? [];
+      const bucketIndex = series.findIndex((candle) => candle.time === bucketTime);
+      if (bucketIndex < 0) continue;
+      const currentSma = smaAt(series, bucketIndex, period);
+      const prevSma = smaAt(series, bucketIndex - 1, period);
+      if (currentSma === null || prevSma === null) continue;
+      validCount += 1;
+      const stat = symbolStats.get(symbol);
+      if (stat) stat.usableBuckets += 1;
+      const close = series[bucketIndex].close;
+      if (close > currentSma && currentSma > prevSma) bullCount += 1;
+      if (close < currentSma && currentSma < prevSma) bearCount += 1;
+    }
+    if (validCount < 3) {
+      stateByBucketTime.set(bucketTime, "neutral");
+      continue;
+    }
+    const bullRatio = bullCount / validCount;
+    const bearRatio = bearCount / validCount;
+    const state = bullRatio >= params.breadthBullThreshold && bullRatio > bearRatio
+      ? "bull"
+      : bearRatio >= params.breadthBearThreshold && bearRatio > bullRatio
+        ? "bear"
+        : "neutral";
+    stateByBucketTime.set(bucketTime, state);
+    stateCounts[state] += 1;
+    validCounts.push(validCount);
+    bullRatios.push(bullRatio);
+    bearRatios.push(bearRatio);
+  }
+
+  let activeBias: MarketBreadthBias = "neutral";
+  let activeBucketTime: number | null = null;
+  for (let i = 0; i < candles.length; i += 1) {
+    const bucketTime = Math.floor(candles[i].time / seconds) * seconds;
+    if (activeBucketTime === null || bucketTime > activeBucketTime) {
+      const completedBucketTime = bucketTime - seconds;
+      activeBias = stateByBucketTime.get(completedBucketTime) ?? "neutral";
+      activeBucketTime = bucketTime;
+    }
+    biases[i] = activeBias;
+  }
+
+  const usableBucketCount = validCounts.length;
+  const diagnostics: MarketBreadthDiagnostics = {
+    requestedSymbols,
+    eligibleSymbols: symbols,
+    minRequiredSymbols: 3,
+    bucketCount: sortedBucketTimes.length,
+    usableBucketCount,
+    stateCounts,
+    averageValidSymbols: validCounts.length ? validCounts.reduce((sum, value) => sum + value, 0) / validCounts.length : 0,
+    minValidSymbols: validCounts.length ? Math.min(...validCounts) : 0,
+    maxValidSymbols: validCounts.length ? Math.max(...validCounts) : 0,
+    averageBullRatio: bullRatios.length ? bullRatios.reduce((sum, value) => sum + value, 0) / bullRatios.length : 0,
+    averageBearRatio: bearRatios.length ? bearRatios.reduce((sum, value) => sum + value, 0) / bearRatios.length : 0,
+    coverageRatio: sortedBucketTimes.length ? usableBucketCount / sortedBucketTimes.length : 0,
+    symbolStats: requestedSymbols.map((symbol) => symbolStats.get(symbol) ?? { symbol, rawCandles: breadthCandlesBySymbol[symbol]?.length ?? 0, bucketCandles: 0, usableBuckets: 0 }),
+    status: "ok",
+  };
+  return { biases, diagnostics };
+}
+
 function isAllowedByHigherTimeframe(signal: "long" | "short", bias: HigherTimeframeBias, params: BacktestParams) {
   if (!params.useHigherTimeframeFilter) return true;
   if (bias === "bull") return signal === "long";
   if (bias === "bear") return signal === "short";
   return false;
+}
+
+function isAllowedByMarketBreadth(signal: "long" | "short", bias: MarketBreadthBias, params: BacktestParams) {
+  if (!params.useMarketBreadthFilter) return true;
+  if (bias === "bull") return signal === "long";
+  if (bias === "bear") return signal === "short";
+  return params.breadthNeutralMode === "allow_current_filter";
+}
+
+function isAllowedByTrendQuality(candles: Candle[], index: number, params: BacktestParams) {
+  const slow = smaAt(candles, index, params.slowPeriod);
+  const atrValue = atrAt(candles, index, params.atrPeriod);
+  if (params.minSlowSmaDistancePct > 0) {
+    if (slow === null) return false;
+    const distance = Math.abs((candles[index].close - slow) / candles[index].close);
+    if (distance < params.minSlowSmaDistancePct) return false;
+  }
+  if (params.minAtrPct > 0) {
+    if (atrValue === null) return false;
+    if (atrValue / candles[index].close < params.minAtrPct) return false;
+  }
+  return true;
 }
 
 function getEntrySignal(candles: Candle[], index: number, params: BacktestParams): "long" | "short" | null {
@@ -334,14 +573,17 @@ function directionBreakdown(candles: Candle[], trades: BacktestTrade[]): Directi
   };
 }
 
-export function runSectionBacktest(candles: Candle[], inputParams?: Partial<BacktestParams>): BacktestSectionResult {
+export function runSectionBacktest(candles: Candle[], inputParams?: Partial<BacktestParams>, breadthCandlesBySymbol?: Record<string, Candle[]>): BacktestSectionResult {
   const params = { ...DEFAULT_PARAMS, ...inputParams };
   const trades: BacktestTrade[] = [];
+  const candidateTrades: BacktestTrade[] = [];
   const exitReasons: Record<string, number> = {};
-  let position: { side: "long" | "short"; entryTime: number; entryPrice: number; entryIndex: number; stopPrice: number | null } | null = null;
+  let position: { side: "long" | "short"; entryTime: number; entryPrice: number; entryIndex: number; stopPrice: number | null; marketBreadthBias: MarketBreadthBias; filteredByMarketBreadth: boolean } | null = null;
   let cooldownUntil = -1;
-  let pendingEntry: { signal: "long" | "short"; executeIndex: number } | null = null;
+  let pendingEntry: { signal: "long" | "short"; executeIndex: number; marketBreadthBias: MarketBreadthBias; filteredByMarketBreadth: boolean } | null = null;
   const higherTimeframeBiases = buildHigherTimeframeBias(candles, params);
+  const marketBreadth = buildMarketBreadthBias(candles, params, breadthCandlesBySymbol);
+  const marketBreadthBiases = marketBreadth.biases;
 
   const warmup = Math.max(params.slowPeriod + 1, params.rsiPeriod + 1, params.atrPeriod + 1, params.adxPeriod * 2 + 1);
   for (let i = warmup; i < candles.length; i += 1) {
@@ -407,14 +649,30 @@ export function runSectionBacktest(candles: Candle[], inputParams?: Partial<Back
           exitPrice: exitPriceWithSlippage,
           pnlPct,
           reason,
+          marketBreadthBias: position.marketBreadthBias,
+          filteredByMarketBreadth: position.filteredByMarketBreadth,
         });
         position = null;
         cooldownUntil = i + Math.max(0, params.cooldownBars);
+        const stopLossCircuitEnabled =
+          params.stopLossCircuitLookbackTrades > 0 &&
+          params.stopLossCircuitMinStops > 0 &&
+          params.stopLossCircuitCooldownBars > 0;
+        if (stopLossCircuitEnabled) {
+          const lookbackTrades = Math.floor(params.stopLossCircuitLookbackTrades);
+          const minStops = Math.floor(params.stopLossCircuitMinStops);
+          const recentTrades = trades.slice(-lookbackTrades);
+          const stopLossCount = recentTrades.filter((trade) => trade.reason === "stop_loss").length;
+          if (recentTrades.length >= lookbackTrades && stopLossCount >= minStops) {
+            cooldownUntil = Math.max(cooldownUntil, i + Math.floor(params.stopLossCircuitCooldownBars));
+          }
+        }
       }
     }
 
     if (!position && i >= cooldownUntil && pendingEntry && i >= pendingEntry.executeIndex) {
-      const signal = pendingEntry.signal;
+      const entry = pendingEntry;
+      const signal = entry.signal;
       pendingEntry = null;
       const atrValue = atrAt(candles, i, params.atrPeriod);
       const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
@@ -426,15 +684,24 @@ export function runSectionBacktest(candles: Candle[], inputParams?: Partial<Back
         entryPrice,
         entryIndex: i,
         stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
+        marketBreadthBias: entry.marketBreadthBias,
+        filteredByMarketBreadth: entry.filteredByMarketBreadth,
       };
     }
 
     if (!position && i >= cooldownUntil && !pendingEntry) {
       const signal = getEntrySignal(candles, i, params);
-      if (signal && isDirectionAllowed(signal, params.tradeDirection) && isAllowedByHigherTimeframe(signal, higherTimeframeBiases[i], params)) {
+      if (signal && isDirectionAllowed(signal, params.tradeDirection) && isAllowedByHigherTimeframe(signal, higherTimeframeBiases[i], params) && isAllowedByTrendQuality(candles, i, params)) {
+        const allowedByBreadth = isAllowedByMarketBreadth(signal, marketBreadthBiases[i], params);
+        if (!allowedByBreadth && !params.useMarketBreadthFilter) continue;
+        if (!allowedByBreadth && params.useMarketBreadthFilter) {
+          const candidateResult = simulateTradeExit(candles, i, signal, params, marketBreadthBiases[i], true);
+          if (candidateResult) candidateTrades.push(candidateResult);
+          continue;
+        }
         const delay = Math.max(0, Math.floor(params.signalDelayBars));
         if (delay > 0) {
-          pendingEntry = { signal, executeIndex: i + delay };
+          pendingEntry = { signal, executeIndex: i + delay, marketBreadthBias: marketBreadthBiases[i], filteredByMarketBreadth: false };
         } else {
           const atrValue = atrAt(candles, i, params.atrPeriod);
           const entryPrice = applyEntrySlippage(candle.close, signal, params.slippageRate);
@@ -446,13 +713,15 @@ export function runSectionBacktest(candles: Candle[], inputParams?: Partial<Back
             entryPrice,
             entryIndex: i,
             stopPrice: params.useTrailingStop ? entryPrice - direction * atrStopDistance : null,
+            marketBreadthBias: marketBreadthBiases[i],
+            filteredByMarketBreadth: false,
           };
         }
       }
     }
   }
 
-  return { metrics: metrics(candles, trades), trades, exitReasons, directionBreakdown: directionBreakdown(candles, trades) };
+  return { metrics: metrics(candles, trades), trades, candidateTrades, marketBreadthDiagnostics: marketBreadth.diagnostics, exitReasons, directionBreakdown: directionBreakdown(candles, trades) };
 }
 
 function runWalkForward(candles: Candle[], strategyParams: BacktestParams): WalkForwardRow[] {
@@ -487,21 +756,36 @@ export function runSplitBacktest(params: {
   candles: Candle[];
   trainRatio?: number;
   strategyParams?: Partial<BacktestParams>;
+  breadthCandlesBySymbol?: Record<string, Candle[]>;
 }): BacktestResult {
   const trainRatio = Math.min(Math.max(params.trainRatio ?? 0.7, 0.2), 0.9);
   const splitIndex = Math.floor(params.candles.length * trainRatio);
-  const trainCandles = params.candles.slice(0, splitIndex);
-  const testCandles = params.candles.slice(Math.max(0, splitIndex - 80));
+  const trainStart = 0;
+  const trainEnd = splitIndex;
+  const testStart = Math.max(0, splitIndex - 80);
+  const testEnd = params.candles.length;
+  const trainCandles = params.candles.slice(trainStart, trainEnd);
+  const testCandles = params.candles.slice(testStart, testEnd);
 
   const strategyParams = { ...DEFAULT_PARAMS, ...params.strategyParams };
+  const sliceBreadthCandles = (startIndex: number, endIndex: number) => {
+    if (!params.breadthCandlesBySymbol) return undefined;
+    const startTime = params.candles[startIndex]?.time ?? params.candles[0]?.time ?? 0;
+    const endTime = params.candles[Math.max(startIndex, endIndex - 1)]?.time ?? params.candles[params.candles.length - 1]?.time ?? Number.MAX_SAFE_INTEGER;
+    const paddingSeconds = higherTimeframeSeconds(strategyParams.breadthTimeframe) * Math.max(strategyParams.breadthSmaPeriod + 2, 4);
+    return Object.fromEntries(Object.entries(params.breadthCandlesBySymbol).map(([symbol, symbolCandles]) => [
+      symbol,
+      symbolCandles.filter((candle) => candle.time >= startTime - paddingSeconds && candle.time <= endTime),
+    ]));
+  };
 
   return {
     symbol: params.symbol,
     interval: params.interval,
     strategy: strategyParams.strategy,
     split: {
-      train: runSectionBacktest(trainCandles, strategyParams),
-      test: runSectionBacktest(testCandles, strategyParams),
+      train: runSectionBacktest(trainCandles, strategyParams, sliceBreadthCandles(trainStart, trainEnd)),
+      test: runSectionBacktest(testCandles, strategyParams, sliceBreadthCandles(testStart, testEnd)),
     },
     walkForward: runWalkForward(params.candles, strategyParams),
   };
